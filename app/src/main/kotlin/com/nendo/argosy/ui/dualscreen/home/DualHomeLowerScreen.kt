@@ -6,8 +6,6 @@
  */
 package com.nendo.argosy.ui.dualscreen.home
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -28,15 +26,12 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material3.Icon
@@ -48,51 +43,30 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.nendo.argosy.hardware.CompanionAppBar
 import com.nendo.argosy.ui.components.AlphabetSidebar
-import com.nendo.argosy.ui.components.DownloadProgressCover
+import com.nendo.argosy.ui.components.GameCard
+import com.nendo.argosy.ui.screens.home.HomeGameUi
 import com.nendo.argosy.ui.util.touchOnly
 import java.io.File
-
-data class DualHomeGameUi(
-    val id: Long,
-    val title: String,
-    val sortTitle: String,
-    val coverPath: String?,
-    val platformName: String,
-    val platformSlug: String,
-    val playTimeMinutes: Int,
-    val lastPlayedAt: Long?,
-    val status: String?,
-    val communityRating: Float?,
-    val userRating: Int,
-    val userDifficulty: Int,
-    val isPlayable: Boolean,
-    val isFavorite: Boolean,
-    val backgroundPath: String?,
-    val description: String?,
-    val developer: String?,
-    val releaseYear: Int?,
-    val titleId: String?,
-    val genre: String? = null,
-    val gameModes: String? = null,
-    val franchises: String? = null,
-    val addedAt: Long? = null,
-    val playCount: Int = 0,
-    val downloadProgress: Float? = null
-)
+import kotlin.math.abs
 
 private val CARD_WIDTH = 100.dp
 private val CARD_HEIGHT = 140.dp
@@ -104,7 +78,7 @@ private val GRID_CARD_SIZE = 100.dp
 
 @Composable
 fun DualHomeLowerScreen(
-    games: List<DualHomeGameUi>,
+    games: List<HomeGameUi>,
     selectedIndex: Int,
     platformName: String,
     totalCount: Int,
@@ -114,8 +88,10 @@ fun DualHomeLowerScreen(
     appBarFocused: Boolean,
     appBarIndex: Int,
     viewMode: DualHomeViewMode,
+    repairedCoverPaths: Map<Long, String> = emptyMap(),
     onGameTapped: (Int) -> Unit,
     onGameSelected: (Long) -> Unit,
+    onCoverLoadFailed: (Long, String) -> Unit = { _, _ -> },
     onAppClick: (String) -> Unit,
     onCollectionsClick: () -> Unit,
     onLibraryToggle: () -> Unit,
@@ -124,21 +100,59 @@ fun DualHomeLowerScreen(
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp.dp
+    val centerPadding = (screenWidthDp - FOCUSED_CARD_WIDTH) / 2
+
+    val currentSelectedIndex by rememberUpdatedState(selectedIndex)
+    val currentGames by rememberUpdatedState(games)
+    val currentOnGameTapped by rememberUpdatedState(onGameTapped)
+    var skipNextProgrammatic by remember { mutableStateOf(false) }
+    var isUserScroll by remember { mutableStateOf(false) }
 
     LaunchedEffect(selectedIndex, games) {
         if (games.isNotEmpty()) {
             if (selectedIndex in games.indices) {
                 com.nendo.argosy.DualScreenManagerHolder.instance
                     ?.onGameSelected(games[selectedIndex].toShowcaseState())
-                listState.animateScrollToItem(
-                    index = selectedIndex,
-                    scrollOffset = -200
-                )
-            } else if (hasMoreGames && selectedIndex == games.size) {
-                listState.animateScrollToItem(
-                    index = games.size,
-                    scrollOffset = -200
-                )
+            }
+            if (!skipNextProgrammatic) {
+                if (selectedIndex in games.indices) {
+                    listState.animateScrollToItem(
+                        index = selectedIndex,
+                        scrollOffset = 0
+                    )
+                } else if (hasMoreGames && selectedIndex == games.size) {
+                    listState.animateScrollToItem(
+                        index = games.size,
+                        scrollOffset = 0
+                    )
+                }
+            } else {
+                skipNextProgrammatic = false
+            }
+        }
+    }
+
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            Triple(listState.isScrollInProgress, isUserScroll, listState.layoutInfo)
+        }.collect { (isScrolling, userScroll, layoutInfo) ->
+            if (isScrolling && userScroll) {
+                val viewportCenter =
+                    (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) / 2
+                val closest = layoutInfo.visibleItemsInfo.minByOrNull {
+                    abs((it.offset + it.size / 2) - viewportCenter)
+                }
+                if (closest != null &&
+                    closest.index != currentSelectedIndex &&
+                    closest.index < currentGames.size
+                ) {
+                    skipNextProgrammatic = true
+                    currentOnGameTapped(closest.index)
+                }
+            }
+            if (!isScrolling && userScroll) {
+                isUserScroll = false
             }
         }
     }
@@ -199,21 +213,46 @@ fun DualHomeLowerScreen(
         ) {
             LazyRow(
                 state = listState,
-                contentPadding = PaddingValues(horizontal = 120.dp),
+                contentPadding = PaddingValues(horizontal = centerPadding),
                 horizontalArrangement = Arrangement.spacedBy(CARD_SPACING),
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                awaitPointerEvent(
+                                    androidx.compose.ui.input.pointer.PointerEventPass.Initial
+                                )
+                                isUserScroll = true
+                            }
+                        }
+                    }
             ) {
                 itemsIndexed(games, key = { _, game -> game.id }) { index, game ->
-                    CarouselGameCard(
-                        game = game,
-                        isSelected = index == selectedIndex,
-                        showBorder = index == selectedIndex && !appBarFocused,
-                        onClick = {
-                            onGameTapped(index)
-                            onGameSelected(game.id)
-                        }
-                    )
+                    val isSelected = index == selectedIndex
+                    val cardWidth = if (isSelected) FOCUSED_CARD_WIDTH else CARD_WIDTH
+                    val cardHeight = if (isSelected) FOCUSED_CARD_HEIGHT else CARD_HEIGHT
+                    Box(
+                        modifier = Modifier
+                            .size(width = cardWidth, height = cardHeight)
+                            .touchOnly {
+                                onGameTapped(index)
+                                onGameSelected(game.id)
+                            }
+                    ) {
+                        GameCard(
+                            game = game,
+                            isFocused = isSelected && !appBarFocused,
+                            modifier = Modifier.fillMaxSize(),
+                            focusScale = 1f,
+                            alphaOverride = if (isSelected) 1f else 0.5f,
+                            showPlatformBadge = true,
+                            onCoverLoadFailed = onCoverLoadFailed,
+                            coverPathOverride = repairedCoverPaths[game.id],
+                            downloadIndicator = game.downloadIndicator
+                        )
+                    }
                 }
                 if (hasMoreGames) {
                     item(key = "view_all") {
@@ -466,7 +505,9 @@ fun DualHomeLibraryGrid(
     platformLabel: String = "All",
     showSectionOverlay: Boolean = false,
     overlaySectionLabel: String = "",
+    repairedCoverPaths: Map<Long, String> = emptyMap(),
     onGameTapped: (Int) -> Unit,
+    onCoverLoadFailed: (Long, String) -> Unit = { _, _ -> },
     onSectionClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -531,11 +572,22 @@ fun DualHomeLibraryGrid(
                                 DualSectionDivider(label = item.label)
                             }
                             is DualLibraryGridItem.Game -> {
-                                LibraryGridCard(
-                                    game = item.game,
-                                    isFocused = item.gameIndex == focusedIndex,
-                                    onClick = { onGameTapped(item.gameIndex) }
-                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(GRID_CARD_SIZE)
+                                        .touchOnly { onGameTapped(item.gameIndex) }
+                                ) {
+                                    GameCard(
+                                        game = item.game,
+                                        isFocused = item.gameIndex == focusedIndex,
+                                        modifier = Modifier.fillMaxSize(),
+                                        focusScale = 1f,
+                                        showPlatformBadge = false,
+                                        onCoverLoadFailed = onCoverLoadFailed,
+                                        coverPathOverride = repairedCoverPaths[item.game.id],
+                                        downloadIndicator = item.game.downloadIndicator
+                                    )
+                                }
                             }
                         }
                     }
@@ -610,72 +662,6 @@ private fun LetterJumpOverlay(
     }
 }
 
-@Composable
-private fun LibraryGridCard(
-    game: DualHomeGameUi,
-    isFocused: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Box(
-        modifier = modifier
-            .size(GRID_CARD_SIZE)
-            .clip(RoundedCornerShape(6.dp))
-            .then(
-                if (isFocused) {
-                    Modifier.border(
-                        width = 3.dp,
-                        color = MaterialTheme.colorScheme.primary,
-                        shape = RoundedCornerShape(6.dp)
-                    )
-                } else Modifier
-            )
-            .touchOnly(onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        if (game.coverPath != null) {
-            val imageData = File(game.coverPath)
-            if (game.downloadProgress != null) {
-                DownloadProgressCover(
-                    imageData = imageData,
-                    progress = game.downloadProgress,
-                    badgeSize = 32.dp,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                AsyncImage(
-                    model = imageData,
-                    contentDescription = game.title,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = game.title.take(2).uppercase(),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-
-        if (game.downloadProgress == null && (game.isFavorite || game.isPlayable)) {
-            GameStatusIcons(
-                isFavorite = game.isFavorite,
-                isPlayable = game.isPlayable,
-                iconSize = 12.dp,
-                badgeSize = 18.dp,
-                modifier = Modifier.align(Alignment.BottomCenter)
-            )
-        }
-    }
-}
 
 // --- Filter Overlay ---
 
@@ -792,84 +778,6 @@ fun DualFilterOverlay(
 // --- Shared Composables ---
 
 @Composable
-private fun CarouselGameCard(
-    game: DualHomeGameUi,
-    isSelected: Boolean,
-    showBorder: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val alpha by animateFloatAsState(
-        targetValue = if (isSelected) 1f else 0.5f,
-        animationSpec = spring(dampingRatio = 0.8f, stiffness = 300f),
-        label = "card_alpha"
-    )
-
-    val cardWidth = if (isSelected) FOCUSED_CARD_WIDTH else CARD_WIDTH
-    val cardHeight = if (isSelected) FOCUSED_CARD_HEIGHT else CARD_HEIGHT
-
-    Box(
-        modifier = modifier
-            .size(width = cardWidth, height = cardHeight)
-            .graphicsLayer { this.alpha = alpha }
-            .clip(RoundedCornerShape(8.dp))
-            .then(
-                if (showBorder) {
-                    Modifier.border(
-                        width = 3.dp,
-                        color = MaterialTheme.colorScheme.primary,
-                        shape = RoundedCornerShape(8.dp)
-                    )
-                } else Modifier
-            )
-            .touchOnly(onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        if (game.coverPath != null) {
-            val imageData = File(game.coverPath)
-            if (game.downloadProgress != null) {
-                DownloadProgressCover(
-                    imageData = imageData,
-                    progress = game.downloadProgress,
-                    badgeSize = 36.dp,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                AsyncImage(
-                    model = imageData,
-                    contentDescription = game.title,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = game.title.take(2).uppercase(),
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-
-        if (game.downloadProgress == null && (game.isFavorite || game.isPlayable)) {
-            GameStatusIcons(
-                isFavorite = game.isFavorite,
-                isPlayable = game.isPlayable,
-                iconSize = 14.dp,
-                badgeSize = 20.dp,
-                modifier = Modifier.align(Alignment.BottomCenter)
-            )
-        }
-    }
-}
-
-@Composable
 private fun ViewAllCard(
     remainingCount: Int,
     isFocused: Boolean,
@@ -945,17 +853,17 @@ private fun PositionIndicator(
     }
 }
 
-fun DualHomeGameUi.toShowcaseState() = DualHomeShowcaseState(
+fun HomeGameUi.toShowcaseState() = DualHomeShowcaseState(
     gameId = id,
     title = title,
     coverPath = coverPath,
     backgroundPath = backgroundPath,
-    platformName = platformName,
+    platformName = platformDisplayName,
     platformSlug = platformSlug,
     playTimeMinutes = playTimeMinutes,
     lastPlayedAt = lastPlayedAt ?: 0,
     status = status,
-    communityRating = communityRating,
+    communityRating = rating,
     userRating = userRating,
     userDifficulty = userDifficulty,
     description = description,
@@ -966,55 +874,3 @@ fun DualHomeGameUi.toShowcaseState() = DualHomeShowcaseState(
     isDownloaded = isPlayable
 )
 
-@Composable
-private fun GameStatusIcons(
-    isFavorite: Boolean,
-    isPlayable: Boolean,
-    iconSize: Dp,
-    badgeSize: Dp,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 3.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Bottom
-    ) {
-        if (isFavorite) {
-            Box(
-                modifier = Modifier
-                    .size(badgeSize)
-                    .background(Color.Black.copy(alpha = 0.35f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Favorite,
-                    contentDescription = "Favorite",
-                    tint = Color.White,
-                    modifier = Modifier.size(iconSize)
-                )
-            }
-        } else {
-            Box(modifier = Modifier.size(badgeSize))
-        }
-
-        if (isPlayable) {
-            Box(
-                modifier = Modifier
-                    .size(badgeSize)
-                    .background(Color.Black.copy(alpha = 0.35f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.CheckCircle,
-                    contentDescription = "Installed",
-                    tint = Color.White,
-                    modifier = Modifier.size(iconSize)
-                )
-            }
-        } else {
-            Box(modifier = Modifier.size(badgeSize))
-        }
-    }
-}
