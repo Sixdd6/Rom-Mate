@@ -341,7 +341,6 @@ class DualGameDetailViewModel(
             _selectedScreenshotIndex.value =
                 if (screenshots.isNotEmpty()) 0 else -1
             _selectedOptionIndex.value = 0
-            _savesLoading.value = true
             observeDownloads(game.id)
         }
     }
