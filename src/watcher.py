@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from src.utils import calculate_folder_hash, calculate_file_hash, calculate_zip_content_hash, zip_path
 
-class ArgosyWatcher(QThread):
+class WingosyWatcher(QThread):
     log_signal = Signal(str)
     path_detected_signal = Signal(str, str) # emu_display_name, path
 
@@ -22,7 +22,7 @@ class ArgosyWatcher(QThread):
         self.failed_pids = set()
         self.skip_next_pull_rom_id = None # Flag to prevent double-pull when launching from app
         
-        self.cache_path = Path.home() / ".argosy" / "sync_cache.json"
+        self.cache_path = Path.home() / ".wingosy" / "sync_cache.json"
         self.sync_cache = {}
         if self.cache_path.exists():
             try:

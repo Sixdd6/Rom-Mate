@@ -2,8 +2,10 @@ import sys
 from PySide6.QtWidgets import QApplication, QMessageBox
 from src.config import ConfigManager
 from src.api import RomMClient
-from src.watcher import ArgosyWatcher
-from src.ui import ArgosyMainWindow, SetupDialog
+from src.watcher import WingosyWatcher
+from src.ui import WingosyMainWindow, SetupDialog
+
+VERSION = "0.2.1"
 
 def main():
     app = QApplication(sys.argv)
@@ -35,7 +37,7 @@ def main():
         config.set("token", None)
         sys.exit(1)
 
-    window = ArgosyMainWindow(config, client, ArgosyWatcher)
+    window = WingosyMainWindow(config, client, WingosyWatcher, VERSION)
     window.show()
     
     sys.exit(app.exec())

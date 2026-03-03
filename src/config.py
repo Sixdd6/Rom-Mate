@@ -10,7 +10,7 @@ class ConfigManager:
         "token": None,
         "auto_track": False,
         "auto_pull_saves": True,
-        "device_id": "argosy-win-default",
+        "device_id": "wingosy-win-default",
         "base_rom_path": str(Path.home() / "Games" / "ROMs"),
         "base_emu_path": str(Path.home() / "Games" / "Emulators"),
         "preferred_emulators": {
@@ -83,7 +83,7 @@ class ConfigManager:
     }
 
     def __init__(self):
-        self.config_dir = Path.home() / ".argosy"
+        self.config_dir = Path.home() / ".wingosy"
         self.config_file = self.config_dir / "config.json"
         self.data = self.DEFAULT_CONFIG.copy()
         self.load()

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import time
 import json
+import webbrowser
 from pathlib import Path
 from PySide6.QtWidgets import (QApplication, QMainWindow, QTextEdit, QVBoxLayout, 
                              QWidget, QLabel, QLineEdit, QPushButton, QFormLayout, 
@@ -37,7 +38,7 @@ def format_speed(bytes_per_sec):
 class SetupDialog(QDialog):
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Argosy Setup")
+        self.setWindowTitle("Wingosy Setup")
         self.config = config_manager
         self.resize(400, 200)
         layout = QFormLayout(self)
@@ -60,16 +61,39 @@ class SetupDialog(QDialog):
             "password": self.pass_input.text()
         }
 
+class UpdaterThread(QThread):
+    finished = Signal(bool, str, str) # update_available, latest_version, download_url
+    def __init__(self, current_version):
+        super().__init__()
+        self.current_version = current_version
+    def run(self):
+        try:
+            api_url = "https://api.github.com/repos/abduznik/Wingosy-Launcher/releases/latest"
+            resp = requests.get(api_url, timeout=10).json()
+            latest_version = resp.get("tag_name", "").replace("v", "")
+            if latest_version and latest_version != self.current_version:
+                download_url = ""
+                for asset in resp.get("assets", []):
+                    if asset["name"].endswith(".exe"):
+                        download_url = asset["browser_download_url"]
+                        break
+                self.finished.emit(True, latest_version, download_url)
+            else:
+                self.finished.emit(False, latest_version, "")
+        except:
+            self.finished.emit(False, "", "")
+
 class SettingsDialog(QDialog):
     def __init__(self, config_manager, main_window, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.config = config_manager
         self.main_window = main_window
-        self.resize(400, 350)
+        self.resize(400, 450)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"<b>RomM Host:</b> {self.config.get('host')}"))
         layout.addWidget(QLabel(f"<b>User:</b> {self.config.get('username')}"))
+        layout.addWidget(QLabel(f"<b>Version:</b> {self.main_window.version}"))
         
         self.auto_pull_btn = QPushButton("Auto Pull Saves: ON" if self.config.get("auto_pull_saves", True) else "Auto Pull Saves: OFF")
         self.auto_pull_btn.setCheckable(True)
@@ -85,6 +109,16 @@ class SettingsDialog(QDialog):
         self.switch_pref.setCurrentText(current)
         self.switch_pref.currentTextChanged.connect(self.set_switch_pref)
         layout.addWidget(self.switch_pref)
+        
+        layout.addSpacing(10)
+        self.update_btn = QPushButton("Check for Updates")
+        self.update_btn.clicked.connect(self.check_updates)
+        layout.addWidget(self.update_btn)
+        
+        self.upgrade_btn = QPushButton("Upgrade Available!")
+        self.upgrade_btn.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold;")
+        self.upgrade_btn.setVisible(False)
+        layout.addWidget(self.upgrade_btn)
         
         layout.addStretch()
         
@@ -105,6 +139,25 @@ class SettingsDialog(QDialog):
         prefs = self.config.get("preferred_emulators", {})
         prefs["switch"] = val
         self.config.set("preferred_emulators", prefs)
+
+    def check_updates(self):
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("Checking...")
+        self.updater = UpdaterThread(self.main_window.version)
+        self.updater.finished.connect(self.on_update_result)
+        self.updater.start()
+
+    def on_update_result(self, available, version, url):
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText("Check for Updates")
+        if available:
+            self.upgrade_btn.setText(f"Upgrade to v{version}")
+            self.upgrade_btn.setVisible(True)
+            try: self.upgrade_btn.clicked.disconnect()
+            except: pass
+            self.upgrade_btn.clicked.connect(lambda: webbrowser.open(url))
+        else:
+            QMessageBox.information(self, "No Updates", "You are running the latest version.")
 
     def do_logout(self):
         self.config.set("token", None)
@@ -238,7 +291,7 @@ class GithubDownloader(BaseDownloader):
     def run(self):
         try:
             api_url = f"https://api.github.com/repos/{self.repo}/releases/latest"
-            headers = {'User-Agent': 'ArgosyLauncher'}
+            headers = {'User-Agent': 'WingosyLauncher'}
             resp_obj = requests.get(api_url, timeout=15, headers=headers)
             if resp_obj.status_code != 200:
                 self.finished.emit(False, f"Repo {self.repo} not found.")
@@ -413,6 +466,7 @@ class GameDetailDialog(QDialog):
         base_rom = self.config.get("base_rom_path")
         rom_name = self.game.get('fs_name')
         
+        # Robust ROM search
         local_rom = Path(base_rom) / platform / rom_name
         if not local_rom.exists():
             local_rom = Path(base_rom) / rom_name
@@ -460,6 +514,7 @@ class GameDetailDialog(QDialog):
         if save_path:
             self.main_window.watcher.skip_next_pull_rom_id = str(self.game['id'])
             is_folder = os.path.isdir(save_path) if os.path.exists(save_path) else False
+            # Force pull from server regardless of cache in Play mode
             self.main_window.watcher.pull_server_save(self.game['id'], self.game.get('name'), save_path, is_folder, force=True)
         
         try:
@@ -499,14 +554,14 @@ class GameDetailDialog(QDialog):
         elif p != "Cancelled":
             QMessageBox.critical(self, "Error", "Download failed.")
 
-class ArgosyMainWindow(QMainWindow):
-    def __init__(self, config_manager, client, watcher_class):
+class WingosyMainWindow(QMainWindow):
+    def __init__(self, config_manager, client, watcher_class, version):
         super().__init__()
-        self.config, self.client, self.watcher_class = config_manager, client, watcher_class
+        self.config, self.client, self.watcher_class, self.version = config_manager, client, watcher_class, version
         self.watcher = None
         self.active_threads = []
         self.all_games = []
-        self.setWindowTitle("Argosy Desktop Launcher")
+        self.setWindowTitle("Wingosy Launcher")
         self.resize(1100, 800)
         
         # Set Application Icon
@@ -524,7 +579,7 @@ class ArgosyMainWindow(QMainWindow):
         self.setCentralWidget(c)
         l = QVBoxLayout(c)
         h = QHBoxLayout()
-        h.addWidget(QLabel("<h1 style='color: #1e88e5;'>Argosy Launcher</h1>"))
+        h.addWidget(QLabel("<h1 style='color: #1e88e5;'>Wingosy Launcher</h1>"))
         h.addStretch()
         self.tr_btn = QPushButton("START TRACKING")
         self.tr_btn.setFixedSize(150, 35)

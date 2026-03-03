@@ -1,64 +1,67 @@
 import hashlib
-import zipfile
 import os
+import zipfile
 from pathlib import Path
 
 def calculate_file_hash(file_path):
-    md5 = hashlib.md5()
-    with open(file_path, 'rb') as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            md5.update(chunk)
-    return md5.hexdigest()
+    if not os.path.exists(file_path):
+        return None
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
 
 def calculate_folder_hash(folder_path):
     """
-    Calculates a content-based hash of a folder.
-    Matches RomM/Argosy logic: sorted list of 'name:md5' lines.
+    Matches RomM/Wingosy logic: sorted list of 'name:md5' lines.
     """
-    folder = Path(folder_path)
-    if not folder.exists(): return None
+    if not os.path.exists(folder_path):
+        return None
     
-    entries = []
-    for file in folder.rglob('*'):
-        if file.is_file():
-            file_hash = calculate_file_hash(file)
-            # Use name relative to parent to include the folder name itself in the hash
-            entry_name = file.relative_to(folder.parent).as_posix()
-            entries.append(f"{entry_name}:{file_hash}")
+    files_data = []
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            full_path = Path(root) / file
+            rel_path = full_path.relative_to(folder_path).as_posix()
+            
+            md5_hash = hashlib.md5()
+            with open(full_path, "rb") as f:
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    md5_hash.update(byte_block)
+            
+            files_data.append(f"{rel_path}:{md5_hash.hexdigest()}")
     
-    entries.sort()
-    combined = "\n".join(entries)
-    return hashlib.md5(combined.encode('utf-8')).hexdigest()
+    files_data.sort()
+    combined = "\n".join(files_data).encode('utf-8')
+    return hashlib.sha256(combined).hexdigest()
 
 def calculate_zip_content_hash(zip_path):
     """
-    Calculates a content-based hash of the files INSIDE a ZIP.
-    Allows comparing a server ZIP to a local folder without binary-matching the ZIP container.
+    Simulate folder hash for a ZIP by hashing its internal members.
     """
-    if not os.path.exists(zip_path): return None
-    
-    entries = []
+    if not os.path.exists(zip_path) or not zipfile.is_zipfile(zip_path):
+        return None
+        
+    files_data = []
     with zipfile.ZipFile(zip_path, 'r') as z:
-        for info in z.infolist():
-            if not info.is_dir():
-                # Read file content from zip and hash it
-                with z.open(info) as f:
-                    file_hash = hashlib.md5(f.read()).hexdigest()
-                # entry name matches the one in calculate_folder_hash
-                entries.append(f"{info.filename}:{file_hash}")
-    
-    entries.sort()
-    combined = "\n".join(entries)
-    return hashlib.md5(combined.encode('utf-8')).hexdigest()
+        for member in z.infolist():
+            if not member.is_dir():
+                content = z.read(member)
+                md5_h = hashlib.md5(content).hexdigest()
+                files_data.append(f"{member.filename}:{md5_h}")
+                
+    files_data.sort()
+    combined = "\n".join(files_data).encode('utf-8')
+    return hashlib.sha256(combined).hexdigest()
 
 def zip_path(source_path, output_zip):
-    source = Path(source_path)
-    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        if source.is_file():
-            zipf.write(source, source.name)
+    source_path = Path(source_path)
+    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as z:
+        if source_path.is_file():
+            z.write(source_path, source_path.name)
         else:
-            for file in source.rglob('*'):
-                if file.is_file():
-                    arcname = file.relative_to(source.parent).as_posix()
-                    zipf.write(file, arcname)
-    return output_zip
+            for root, _, files in os.walk(source_path):
+                for file in files:
+                    full_path = Path(root) / file
+                    z.write(full_path, full_path.relative_to(source_path))
