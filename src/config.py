@@ -8,8 +8,8 @@ class ConfigManager:
     DEFAULT_CONFIG = {
         "host": "http://localhost:8285",
         "username": "admin",
-        "token": None,
         "auto_track": False,
+        "first_run": True,
         "auto_pull_saves": True,
         "device_id": "wingosy-win-default",
         "base_rom_path": str(Path.home() / "Games" / "ROMs"),

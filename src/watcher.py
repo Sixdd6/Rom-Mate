@@ -9,9 +9,20 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from src.utils import calculate_folder_hash, calculate_file_hash, calculate_zip_content_hash, zip_path
 
+RETROARCH_PLATFORMS = [
+    "n64", "psx", "ps1", "snes", "nes", "gba", "gbc", "gb",
+    "genesis", "megadrive", "sega-genesis", "32x", "segacd",
+    "gamegear", "mastersystem", "atari2600", "atari7800",
+    "lynx", "ngp", "ngpc", "pcengine", "wonderswan", "msx",
+    "arcade", "fba", "neogeo", "c64", "dos", "3do", "jaguar",
+    "saturn", "dreamcast", "nds", "gba", "psp"
+]
+
 class WingosyWatcher(QThread):
     log_signal = Signal(str)
     path_detected_signal = Signal(str, str) # emu_display_name, path
+    conflict_signal = Signal(str, str, str, str) # title, local_path, temp_dl, rom_id
+    notify_signal = Signal(str, str) # title, msg
 
     def __init__(self, client, config_manager):
         super().__init__()
@@ -137,6 +148,12 @@ class WingosyWatcher(QThread):
             if os.path.exists(local_path):
                 local_hash = calculate_folder_hash(local_path) if is_folder else calculate_file_hash(local_path)
 
+            if not force and local_hash and server_hash != local_hash:
+                # Save Conflict Detected
+                self.log_signal.emit(f"⚠️ Save conflict detected for {title}!")
+                self.conflict_signal.emit(title, local_path, temp_dl, str(rom_id))
+                return # Stop here, wait for UI resolution
+
             if not force and local_hash and server_hash == local_hash:
                 self.log_signal.emit("☁️ Local save identical to cloud.")
                 self.sync_cache[str(rom_id)] = save_id
@@ -195,6 +212,7 @@ class WingosyWatcher(QThread):
                 self.sync_cache[str(rom_id)] = save_id
                 self.save_cache()
                 self.log_signal.emit("✨ Cloud save applied!")
+                self.notify_signal.emit(title, "☁️ Cloud save applied")
             except Exception as e:
                 self.log_signal.emit(f"❌ Failed to apply save: {e}")
             
@@ -263,7 +281,7 @@ class WingosyWatcher(QThread):
                 
                 search_roots = prioritized + [r for r in search_roots if r not in prioritized]
 
-                # --- Method 1: SQLite Game List Cache ---
+                # --- Method 1: SQLite Game List Cache (Schema-Aware) ---
                 if not title_id:
                     for root in search_roots:
                         db_path = root / "cache/game_list/game_list.db"
@@ -271,16 +289,43 @@ class WingosyWatcher(QThread):
                             try:
                                 conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
                                 cursor = conn.cursor()
-                                query = "SELECT title_id FROM game_list WHERE name LIKE ? LIMIT 1"
-                                cursor.execute(query, (f"%{title}%",))
-                                row = cursor.fetchone()
-                                if row:
-                                    title_id = row[0].upper()
-                                    if not title_id.startswith("01"): title_id = f"01{title_id}"
-                                    self.log_signal.emit(f"🔍 [Switch] Found Title ID in emulator cache: {title_id}")
+                                
+                                # 1. Discover tables
+                                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                                tables = [row[0] for row in cursor.fetchall()]
+                                
+                                for table in tables:
+                                    # 2. Discover columns
+                                    cursor.execute(f"PRAGMA table_info({table})")
+                                    cols = [c[1].lower() for c in cursor.fetchall()]
+                                    
+                                    # 3. Identify candidate columns
+                                    id_col = next((c for c in cols if c in ['title_id', 'program_id', 'id'] or ('id' in c and 'title' in c)), None)
+                                    name_col = next((c for c in cols if c in ['name', 'title', 'game_name'] or 'name' in c or 'title' in c), None)
+                                    
+                                    if id_col and name_col:
+                                        # 4. Attempt search
+                                        cursor.execute(f"SELECT {id_col} FROM {table} WHERE {name_col} LIKE ? LIMIT 1", (f"%{title}%",))
+                                        row = cursor.fetchone()
+                                        if row:
+                                            val = row[0]
+                                            # 5. Handle integer or hex string
+                                            if isinstance(val, int):
+                                                title_id = hex(val)[2:].upper().zfill(16)
+                                            else:
+                                                title_id = str(val).upper().replace('0X', '')
+                                            
+                                            # Validate pattern
+                                            if re.match(r'^[0-9A-F]{16}$', title_id):
+                                                self.log_signal.emit(f"🔍 [Switch] Found Title ID in emulator cache ({table}.{id_col}): {title_id}")
+                                                break
+                                            else:
+                                                title_id = None
                                 conn.close()
                                 if title_id: break
-                            except Exception: pass
+                            except Exception:
+                                # Silent skip on error to fall through
+                                pass
 
                 # --- Method 2: XCI Header Extraction ---
                 if not title_id and rom_path and rom_path.exists() and rom_path.suffix.lower() == ".xci":
@@ -406,7 +451,7 @@ class WingosyWatcher(QThread):
                 return search_paths[0]
 
             # 4. RETROARCH
-            elif "RetroArch" in emu_display_name or platform == "multi":
+            elif "RetroArch" in emu_display_name or platform == "multi" or platform in RETROARCH_PLATFORMS:
                 rom_name = Path(title).stem.lower()
                 for game in self.client.user_games:
                     if game['name'] == title: rom_name = Path(game['fs_name']).stem.lower()

@@ -26,7 +26,7 @@ jobs:
       - name: Build EXE
         run: |
           # Pillow is now installed, so PyInstaller can convert icon.png to .ico automatically
-          pyinstaller --noconsole --onefile --name Wingosy --icon "icon.png" --add-data "icon.png;." main.py
+          pyinstaller --noconsole --onefile --name Wingosy --icon "icon.png" --add-data "icon.png;." --hidden-import sqlite3 --hidden-import src.ui --hidden-import src.ui.main_window --hidden-import src.ui.dialogs --hidden-import src.ui.threads --hidden-import src.ui.widgets --hidden-import src.ui.tabs --hidden-import src.ui.tabs.library --hidden-import src.ui.tabs.emulators main.py
           
       - name: Release
         uses: softprops/action-gh-release@v2

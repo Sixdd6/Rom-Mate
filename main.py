@@ -1,11 +1,12 @@
 import sys
+from pathlib import Path
 from PySide6.QtWidgets import QApplication, QMessageBox
 from src.config import ConfigManager
 from src.api import RomMClient
 from src.watcher import WingosyWatcher
 from src.ui import WingosyMainWindow, SetupDialog
 
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 
 def main():
     app = QApplication(sys.argv)
@@ -26,7 +27,7 @@ def main():
     config = ConfigManager()
     
     # Attempt login with token first if available
-    client = RomMClient(config.get("host"))
+    client = RomMClient(config.get("host"), config=config)
     token = config.get("token")
     
     success = False

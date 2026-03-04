@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+pycache/
 *.py[cod]
 *$py.class
 *.so
@@ -21,6 +22,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+*.spec
 
 # Virtual Environment
 venv/
@@ -28,11 +30,13 @@ ENV/
 env/
 .venv/
 
-# Argosy local data
+# Wingosy local data
+.wingosy/
 sync_cache.json
 cloud_check_file
 *.zip
 *.bak
+.env
 
 # OS
 .DS_Store

@@ -4,13 +4,27 @@ import time
 from pathlib import Path
 
 class RomMClient:
-    def __init__(self, host):
+    def __init__(self, host, config=None):
         self.host = host.rstrip('/')
+        self.config = config
         self.token = None
         self.user_games = []
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
+
+    def test_connection(self):
+        try:
+            # Try heartbeat first, then root api
+            for endpoint in ["/api/heartbeat", "/api"]:
+                try:
+                    r = requests.get(f"{self.host}{endpoint}", timeout=5)
+                    if r.status_code == 200:
+                        return True, "Successfully connected to RomM."
+                except: continue
+            return False, "Could not reach RomM API."
+        except Exception as e:
+            return False, str(e)
 
     def login(self, username, password):
         try:
@@ -48,6 +62,8 @@ class RomMClient:
             if r.status_code == 200:
                 self.user_games = r.json().get("items", [])
                 return self.user_games
+            elif r.status_code == 401:
+                return "REAUTH_REQUIRED"
             print(f"[API] Error fetching library ({r.status_code})")
             return []
         except Exception as e:
