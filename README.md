@@ -1,6 +1,6 @@
 # Wingosy Launcher
 
-![Wingosy Example](@Wingosy_example.png)
+![Wingosy Example](Wingosy_example.png)
 
 A Windows port of the original [Argosy Launcher for Android](https://github.com/rommapp/argosy-launcher).
 
