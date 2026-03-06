@@ -232,6 +232,7 @@ class WingosyWatcher(QThread):
         return None
 
     def resolve_save_path(self, emu_display_name, title, full_cmd, emu_path, platform=None, proc=None):
+        self.log_signal.emit(f"🔍 resolve_save_path: emu='{emu_display_name}' platform='{platform}' title='{title}'")
         try:
             emu_dir = Path(emu_path).parent
             
@@ -379,7 +380,7 @@ class WingosyWatcher(QThread):
                 return None
 
             # 2. GAMECUBE / WII / NGC (DOLPHIN)
-            elif "Dolphin" in emu_display_name or platform in ["gc", "wii", "ngc"]:
+            elif "Dolphin" in emu_display_name or platform in ["gc", "wii", "ngc", "gamecube", "nintendo-gamecube", "ngc"]:
                 user_dir = Path.home() / "Documents" / "Dolphin Emulator"
                 if (emu_dir / "portable.txt").exists() or (emu_dir / "User").exists(): 
                     user_dir = emu_dir / "User"
@@ -432,8 +433,7 @@ class WingosyWatcher(QThread):
                     search_paths = [gc_dir / "MemoryCardA.USA.raw", gc_dir / "MemoryCardA.EUR.raw", gc_dir / "MemoryCardA.JPN.raw", gc_dir / "MemoryCardA.raw"]
                     for p in search_paths:
                         if p.exists(): return p
-                    return search_paths[0] if search_paths[0].exists() else None
-
+                    return search_paths[0]
             # 3. PLAYSTATION 2
             elif "PlayStation 2" in emu_display_name or platform == "ps2":
                 search_paths = [emu_dir / "memcards" / "Mcd001.ps2", Path(os.path.expandvars(r'%APPDATA%\PCSX2\memcards\Mcd001.ps2')), Path.home() / "Documents" / "PCSX2" / "memcards" / "Mcd001.ps2"]
