@@ -6,6 +6,8 @@ import shutil
 import zipfile
 import json
 import hashlib
+import logging
+import traceback
 from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from src.utils import calculate_folder_hash, calculate_file_hash, calculate_zip_content_hash, zip_path
@@ -23,6 +25,7 @@ class WingosyWatcher(QThread):
         self.config = config
         self.running = True
         self.active_sessions = {}
+        self.session_errors = {} # rom_id -> consecutive error count
         self.skip_next_pull_rom_id = None # Flag to prevent double-pull when launching from app
         
         self.tmp_dir = Path.home() / ".wingosy" / "tmp"
@@ -35,30 +38,30 @@ class WingosyWatcher(QThread):
                 with open(self.cache_path, 'r') as f:
                     self.sync_cache = json.load(f)
             except Exception as e:
-                print(f"[Watcher] Cache load error: {e}")
+                logging.error(f"[Watcher] Cache load error: {e}")
 
     def save_cache(self):
         try:
             with open(self.cache_path, 'w') as f:
                 json.dump(self.sync_cache, f)
         except Exception as e:
-            print(f"[Watcher] Cache save error: {e}")
+            logging.error(f"[Watcher] Cache save error: {e}")
 
     def run(self):
-        self.log_signal.emit("🚀 Watcher Active (Process-Specific Mode).")
+        logging.info("🚀 Watcher Active (Process-Specific Mode).")
         while self.running:
             # Only poll processes we are explicitly tracking
             for pid, data in list(self.active_sessions.items()):
                 try:
                     # Check if process is still running
                     if not psutil.pid_exists(pid):
-                        self.handle_exit(data)
+                        try:
+                            self.handle_exit(data)
+                        except Exception as e:
+                            logging.error(f"[Watcher] Error in handle_exit for {data.get('title')}:\n{traceback.format_exc()}")
                         del self.active_sessions[pid]
-                    else:
-                        # Optional: periodically verify it's still the SAME process (unlikely to collide in short term)
-                        pass
                 except Exception as e:
-                    self.log_signal.emit(f"❌ Error monitoring PID {pid}: {e}")
+                    logging.error(f"❌ Error monitoring PID {pid}: {e}")
                     del self.active_sessions[pid]
             
             time.sleep(2)
@@ -68,38 +71,42 @@ class WingosyWatcher(QThread):
         Hash the SRM + state file independently for change detection.
         For folder-based cores (PSP), hashes the entire folder tree.
         """
-        if is_folder:
-            from src.utils import calculate_folder_hash
-            try:
+        try:
+            if is_folder:
+                from src.utils import calculate_folder_hash
                 return calculate_folder_hash(str(srm_path))
-            except Exception:
-                return None
-        
-        h = hashlib.md5()
-        found = False
-        for p in [srm_path, state_path]:
-            if p and Path(p).exists():
-                found = True
-                with open(p, 'rb') as f:
-                    h.update(f.read())
-        return h.hexdigest() if found else None
+            
+            h = hashlib.md5()
+            found = False
+            for p in [srm_path, state_path]:
+                if p and Path(p).exists():
+                    found = True
+                    with open(p, 'rb') as f:
+                        h.update(f.read())
+            return h.hexdigest() if found else None
+        except Exception as e:
+            logging.error(f"[Watcher] Error hashing RetroArch files: {e}")
+            return None
 
     def _get_folder_mtime(self, path):
         """Return the newest mtime of any file in a folder tree."""
-        if not path or not os.path.exists(path):
+        try:
+            if not path or not os.path.exists(path):
+                return 0
+            if os.path.isfile(path):
+                return os.path.getmtime(path)
+            newest = 0
+            for root, dirs, files in os.walk(path):
+                for f in files:
+                    try:
+                        t = os.path.getmtime(os.path.join(root, f))
+                        if t > newest:
+                            newest = t
+                    except Exception:
+                        pass
+            return newest
+        except Exception:
             return 0
-        if os.path.isfile(path):
-            return os.path.getmtime(path)
-        newest = 0
-        for root, dirs, files in os.walk(path):
-            for f in files:
-                try:
-                    t = os.path.getmtime(os.path.join(root, f))
-                    if t > newest:
-                        newest = t
-                except Exception:
-                    pass
-        return newest
 
     def _safe_folder_hash(self, folder_path, retries=3, delay=3):
         from src.utils import calculate_folder_hash
@@ -112,8 +119,11 @@ class WingosyWatcher(QThread):
                 if i < retries - 1:
                     time.sleep(delay)
                 else:
-                    print(f"[Watcher] Could not hash folder after {retries} attempts: {e}")
+                    logging.error(f"[Watcher] Could not hash folder after {retries} attempts: {e}")
                     return None
+            except Exception as e:
+                logging.error(f"[Watcher] Unexpected error in _safe_folder_hash: {e}")
+                return None
 
     def track_session(self, proc, emu_display_name, game_data, local_rom_path, emu_path, skip_pull=False):
         """
@@ -127,7 +137,11 @@ class WingosyWatcher(QThread):
             platform = game_data.get('platform_slug')
 
             # 1. Resolve Save Path
-            res = self.resolve_save_path(emu_display_name, title, full_cmd, emu_path, platform, proc=psutil.Process(pid))
+            res = None
+            try:
+                res = self.resolve_save_path(emu_display_name, title, full_cmd, emu_path, platform, proc=psutil.Process(pid))
+            except Exception as e:
+                logging.error(f"[Watcher] resolve_save_path failed for {title}:\n{traceback.format_exc()}")
             
             if res:
                 save_path, is_folder = res
@@ -152,22 +166,31 @@ class WingosyWatcher(QThread):
 
                 if emu_display_name == "Multi-Console (RetroArch)":
                     ra_emu_data = {"path": emu_path}
-                    save_info = self.get_retroarch_save_path(
-                        game_data, ra_emu_data)
+                    save_info = None
+                    try:
+                        save_info = self.get_retroarch_save_path(game_data, ra_emu_data)
+                    except Exception as e:
+                        logging.error(f"[Watcher] get_retroarch_save_path failed for {title}: {e}")
+
                     if save_info is None:
                         self.log_signal.emit(
                             f"⚠️ Could not resolve RetroArch paths for {title}")
                         return
+                    
                     save_path   = save_info.get('srm') or ""
                     state_path  = save_info.get('state') or ""
                     is_folder   = False
                     if should_pull:
-                        self.pull_server_save(
-                            rom_id, title, save_info, is_folder, force=False)
+                        try:
+                            self.pull_server_save(rom_id, title, save_info, is_folder, force=False)
+                        except Exception as e:
+                            logging.error(f"[Watcher] pull_server_save failed for {title}: {e}")
                 else:
                     if should_pull:
-                        self.pull_server_save(
-                            rom_id, title, save_path, is_folder, force=False)
+                        try:
+                            self.pull_server_save(rom_id, title, save_path, is_folder, force=False)
+                        except Exception as e:
+                            logging.error(f"[Watcher] pull_server_save (direct) failed for {title}: {e}")
                 
                 self._pull_is_retroarch = False
 
@@ -178,15 +201,19 @@ class WingosyWatcher(QThread):
                 both_mode = False
                 state_save_path = None
                 psp_folder = None
+                initial_state_mtime = 0
                 
                 if is_retroarch_game:
-                    ra_res = self.get_retroarch_save_path(game_item, {"path": emu_path})
-                    if isinstance(ra_res, dict):
-                        save_path = str(Path(ra_res['srm']).resolve())
-                        state_save_path = str(Path(ra_res['state']).resolve()) if ra_res.get('state') else None
-                        both_mode = (self.config.get("retroarch_save_mode") == "both")
-                        is_folder = ra_res.get('is_folder', False)
-                        psp_folder = ra_res.get('psp_folder')
+                    try:
+                        ra_res = self.get_retroarch_save_path(game_item, {"path": emu_path})
+                        if isinstance(ra_res, dict):
+                            save_path = str(Path(ra_res['srm']).resolve())
+                            state_save_path = str(Path(ra_res['state']).resolve()) if ra_res.get('state') else None
+                            both_mode = (self.config.get("retroarch_save_mode") == "both")
+                            is_folder = ra_res.get('is_folder', False)
+                            psp_folder = ra_res.get('psp_folder')
+                    except Exception as e:
+                        logging.error(f"[Watcher] Secondary path resolution failed for {title}: {e}")
                 
                 # Track the session with initial state
                 if is_gc_card:
@@ -196,7 +223,7 @@ class WingosyWatcher(QThread):
                     # For PSP, defer hashing to avoid permission/non-existence issues at start
                     h = self._safe_folder_hash(psp_folder) if os.path.exists(psp_folder) else None
                     init_mtime = self._get_folder_mtime(psp_folder) if os.path.exists(psp_folder) else time.time()
-                    initial_state_mtime = os.path.getmtime(state_path) if state_path and os.path.exists(state_path) else 0
+                    initial_state_mtime = os.path.getmtime(state_save_path) if state_save_path and os.path.exists(state_save_path) else 0
                 elif is_retroarch_game:
                     h = self._hash_retroarch_game(save_path, state_save_path, is_folder)
                     init_mtime = max(self._get_folder_mtime(save_path), self._get_folder_mtime(state_save_path))
@@ -224,7 +251,8 @@ class WingosyWatcher(QThread):
                     'state_save_path': state_save_path,
                     'srm_path': srm_p,
                     'state_path': state_p,
-                    'psp_folder': psp_folder
+                    'psp_folder': psp_folder,
+                    'initial_state_mtime': initial_state_mtime
                 }
                 self.active_sessions[pid] = session_data
                 self.log_signal.emit(f"🎮 Tracking {title} on {emu_display_name} (PID: {pid})")
@@ -232,7 +260,7 @@ class WingosyWatcher(QThread):
                 self.log_signal.emit(f"⚠️ Identified {title} but could not resolve local save path.")
                 
         except Exception as e:
-            self.log_signal.emit(f"❌ Error setting up tracking: {e}")
+            logging.error(f"❌ Error setting up tracking: {e}\n{traceback.format_exc()}")
 
     def _clean_romm_filename(self, filename: str) -> str:
         """
@@ -241,9 +269,12 @@ class WingosyWatcher(QThread):
              -> "Super Punch-Out!! (USA).state"
         """
         import re
-        # Correct regex: Match " [date-like content]" before extension
-        cleaned = re.sub(r'\s*\[\d{4}-\d{2}-\d{2}[^\]]+\]', '', filename)
-        return cleaned
+        try:
+            # Correct regex: Match " [date-like content]" before extension
+            cleaned = re.sub(r'\s*\[\d{4}-\d{2}-\d{2}[^\]]+\]', '', filename)
+            return cleaned
+        except Exception:
+            return filename
 
     def pull_server_save(self, rom_id, title, save_info_or_path,
                          is_folder, force=False):
@@ -259,133 +290,141 @@ class WingosyWatcher(QThread):
         self.log_signal.emit(f"☁️ Checking cloud for {title}...")
 
         # Pull SRM / regular save
-        latest_save = self.client.get_latest_save(rom_id)
-        if latest_save:
-            self._apply_cloud_file(
-                rom_id, title, latest_save, srm_path,
-                is_folder, force, file_type="save"
-            )
+        try:
+            latest_save = self.client.get_latest_save(rom_id)
+            if latest_save:
+                self._apply_cloud_file(
+                    rom_id, title, latest_save, srm_path,
+                    is_folder, force, file_type="save"
+                )
+        except Exception as e:
+            logging.error(f"[Watcher] pull_server_save failed for {title} save: {e}")
 
         # Pull State (RetroArch only)
         if state_path:
-            latest_state = self.client.get_latest_state(rom_id)
-            if latest_state:
-                self._apply_cloud_file(
-                    rom_id, title, latest_state, state_path,
-                    False, force, file_type="state"
-                )
+            try:
+                latest_state = self.client.get_latest_state(rom_id)
+                if latest_state:
+                    self._apply_cloud_file(
+                        rom_id, title, latest_state, state_path,
+                        False, force, file_type="state"
+                    )
+            except Exception as e:
+                logging.error(f"[Watcher] pull_server_save failed for {title} state: {e}")
 
     def _apply_cloud_file(self, rom_id, title, cloud_obj, local_path, is_folder, force, file_type="save"):
-        server_updated_at = cloud_obj.get('updated_at', '')
-        
-        # Determine cached updated_at using new dictionary-based rom_id keys
-        cached_val = self.sync_cache.get(str(rom_id), {})
-        if isinstance(cached_val, dict):
-            cached_updated_at = cached_val.get(f'{file_type}_updated_at', '')
-        else:
-            # Fallback for old cache format
-            cached_updated_at = cached_val if file_type == 'save' else ''
-
-        local_exists = os.path.exists(local_path)
-
-        # Only skip if timestamp matches AND the local file actually exists
-        if not force and cached_updated_at == server_updated_at and local_exists:
-            self.log_signal.emit(f"☁️ {'SAVE' if file_type=='save' else 'STATE'} already up to date.")
-            return
-
-        temp_dl = str(self.tmp_dir / f"cloud_check_{rom_id}_{file_type}")
-        
-        success = False
-        if file_type == "state":
-            success = self.client.download_state(cloud_obj, temp_dl)
-        else:
-            success = self.client.download_save(cloud_obj, temp_dl)
-
-        if success:
-            orig_filename = cloud_obj.get('file_name', '') or cloud_obj.get('name', '')
-            filename = self._clean_romm_filename(orig_filename)
+        try:
+            server_updated_at = cloud_obj.get('updated_at', '')
             
-            print(f"[Pull] {file_type} filename before clean={orig_filename}")
-            print(f"[Pull] {file_type} filename after clean={filename}")
+            # Determine cached updated_at using new dictionary-based rom_id keys
+            cached_val = self.sync_cache.get(str(rom_id), {})
+            if isinstance(cached_val, dict):
+                cached_updated_at = cached_val.get(f'{file_type}_updated_at', '')
+            else:
+                # Fallback for old cache format
+                cached_updated_at = cached_val if file_type == 'save' else ''
+
+            local_exists = os.path.exists(local_path)
+
+            # Only skip if timestamp matches AND the local file actually exists
+            if not force and cached_updated_at == server_updated_at and local_exists:
+                self.log_signal.emit(f"☁️ {'SAVE' if file_type=='save' else 'STATE'} already up to date.")
+                return
+
+            temp_dl = str(self.tmp_dir / f"cloud_check_{rom_id}_{file_type}")
             
-            is_raw_retroarch = filename.lower().endswith(('.srm', '.state'))
-            is_zip = zipfile.is_zipfile(temp_dl) if not is_raw_retroarch else False
+            success = False
+            if file_type == "state":
+                success = self.client.download_state(cloud_obj, temp_dl)
+            else:
+                success = self.client.download_save(cloud_obj, temp_dl)
+
+            if success:
+                orig_filename = cloud_obj.get('file_name', '') or cloud_obj.get('name', '')
+                filename = self._clean_romm_filename(orig_filename)
                 
-            # Note: Combined key conflict check removed; blocking pull in UI now handles it
-            
-            self.log_signal.emit(f"📥 Cloud {file_type} is different. Updating...")
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                logging.info(f"[Pull] {file_type} filename before clean={orig_filename}")
+                logging.info(f"[Pull] {file_type} filename after clean={filename}")
+                
+                is_raw_retroarch = filename.lower().endswith(('.srm', '.state'))
+                is_zip = zipfile.is_zipfile(temp_dl) if not is_raw_retroarch else False
+                    
+                # Note: Combined key conflict check removed; blocking pull in UI now handles it
+                
+                self.log_signal.emit(f"📥 Cloud {file_type} is different. Updating...")
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
-            # Backup
-            if os.path.exists(local_path):
-                bak_path = str(local_path) + ".bak"
+                # Backup
+                if os.path.exists(local_path):
+                    bak_path = str(local_path) + ".bak"
+                    try:
+                        if is_folder: shutil.copytree(local_path, bak_path)
+                        else: shutil.copy2(local_path, bak_path)
+                    except Exception: pass
+
                 try:
-                    if is_folder: shutil.copytree(local_path, bak_path)
-                    else: shutil.copy2(local_path, bak_path)
-                except Exception: pass
-
-            try:
-                if is_zip:
-                    if is_folder:
-                        extract_parent = str(Path(local_path).parent)
-                        folder_name = Path(local_path).name
-                        if os.path.exists(local_path): shutil.rmtree(local_path, ignore_errors=True)
-                        os.makedirs(extract_parent, exist_ok=True)
-                        with zipfile.ZipFile(temp_dl, 'r') as z:
-                            names = z.namelist()
-                            has_root = any(n.startswith(folder_name + '/') or n.startswith(folder_name + '\\') for n in names)
-                            if has_root: z.extractall(extract_parent)
-                            else: os.makedirs(local_path, exist_ok=True); z.extractall(local_path)
-                    else:
-                        with zipfile.ZipFile(temp_dl, 'r') as z:
-                            names = z.namelist()
-                            is_gc_bundle = any(n.endswith('.gci') for n in names)
-                            if is_gc_bundle and os.path.isdir(local_path): z.extractall(local_path)
-                            else:
-                                target_member = next((n for n in names if n.endswith(('.ps2', '.srm', '.sav', '.dat', '.sv', '.raw', '.gci', '.state'))), names[0] if names else None)
-                                if target_member:
-                                    with z.open(target_member) as source, open(local_path, 'wb') as target: shutil.copyfileobj(source, target)
-                elif is_raw_retroarch:
-                    dest = Path(local_path)
-                    if dest.is_dir(): dest = dest / filename
-                    shutil.copy2(temp_dl, str(dest))
-                    
-                    final_path = dest
-                    if (dest.suffix == '.state' and not dest.name.endswith('.state.auto')):
-                        auto_path = dest.with_name(dest.name + '.auto')
-                        try:
-                            if auto_path.exists():
-                                if auto_path.is_dir(): shutil.rmtree(auto_path)
-                                else: os.remove(auto_path)
-                            dest.rename(auto_path)
-                            print(f"[Pull] Renamed state -> {auto_path.name}")
-                            final_path = auto_path
-                        except Exception as e: print(f"[Pull] Failed to rename state: {e}")
-                    
-                    if file_type == "state":
-                        # Add delay for RetroArch
-                        import time
-                        time.sleep(0.5)
-                        print(f"[Pull] State file ready at: {final_path}")
-                else:
-                    dest = Path(local_path)
-                    if dest.is_dir():
-                        dest = dest / filename
+                    if is_zip:
+                        if is_folder:
+                            extract_parent = str(Path(local_path).parent)
+                            folder_name = Path(local_path).name
+                            if os.path.exists(local_path): shutil.rmtree(local_path, ignore_errors=True)
+                            os.makedirs(extract_parent, exist_ok=True)
+                            with zipfile.ZipFile(temp_dl, 'r') as z:
+                                names = z.namelist()
+                                has_root = any(n.startswith(folder_name + '/') or n.startswith(folder_name + '\\') for n in names)
+                                if has_root: z.extractall(extract_parent)
+                                else: os.makedirs(local_path, exist_ok=True); z.extractall(local_path)
+                        else:
+                            with zipfile.ZipFile(temp_dl, 'r') as z:
+                                names = z.namelist()
+                                is_gc_bundle = any(n.endswith('.gci') for n in names)
+                                if is_gc_bundle and os.path.isdir(local_path): z.extractall(local_path)
+                                else:
+                                    target_member = next((n for n in names if n.endswith(('.ps2', '.srm', '.sav', '.dat', '.sv', '.raw', '.gci', '.state'))), names[0] if names else None)
+                                    if target_member:
+                                        with z.open(target_member) as source, open(local_path, 'wb') as target: shutil.copyfileobj(source, target)
+                    elif is_raw_retroarch:
+                        dest = Path(local_path)
+                        if dest.is_dir(): dest = dest / filename
                         shutil.copy2(temp_dl, str(dest))
+                        
+                        final_path = dest
+                        if (dest.suffix == '.state' and not dest.name.endswith('.state.auto')):
+                            auto_path = dest.with_name(dest.name + '.auto')
+                            try:
+                                if auto_path.exists():
+                                    if auto_path.is_dir(): shutil.rmtree(auto_path)
+                                    else: os.remove(auto_path)
+                                dest.rename(auto_path)
+                                logging.info(f"[Pull] Renamed state -> {auto_path.name}")
+                                final_path = auto_path
+                            except Exception as e: logging.error(f"[Pull] Failed to rename state: {e}")
+                        
+                        if file_type == "state":
+                            # Add delay for RetroArch
+                            time.sleep(0.5)
+                            logging.info(f"[Pull] State file ready at: {final_path}")
                     else:
-                        if os.path.isdir(local_path): shutil.rmtree(local_path, ignore_errors=True)
-                        shutil.copy2(temp_dl, local_path)
-                
-                # Update cache using new dictionary structure
-                current_entry = self.sync_cache.get(str(rom_id))
-                if not isinstance(current_entry, dict):
-                    current_entry = {}
-                current_entry[f'{file_type}_updated_at'] = server_updated_at
-                self.sync_cache[str(rom_id)] = current_entry
-                self.save_cache()
-                self.log_signal.emit(f"✨ Cloud {file_type} applied!")
-            except Exception as e: self.log_signal.emit(f"❌ Failed to apply {file_type}: {e}")
-            if os.path.exists(temp_dl): os.remove(temp_dl)
+                        dest = Path(local_path)
+                        if dest.is_dir():
+                            dest = dest / filename
+                            shutil.copy2(temp_dl, str(dest))
+                        else:
+                            if os.path.isdir(local_path): shutil.rmtree(local_path, ignore_errors=True)
+                            shutil.copy2(temp_dl, local_path)
+                    
+                    # Update cache using new dictionary structure
+                    current_entry = self.sync_cache.get(str(rom_id))
+                    if not isinstance(current_entry, dict):
+                        current_entry = {}
+                    current_entry[f'{file_type}_updated_at'] = server_updated_at
+                    self.sync_cache[str(rom_id)] = current_entry
+                    self.save_cache()
+                    self.log_signal.emit(f"✨ Cloud {file_type} applied!")
+                except Exception as e: self.log_signal.emit(f"❌ Failed to apply {file_type}: {e}")
+                if os.path.exists(temp_dl): os.remove(temp_dl)
+        except Exception as e:
+            logging.error(f"[Watcher] Error in _apply_cloud_file for {title}: {e}")
 
     def resolve_save_path(self, emu_display_name, title, full_cmd, emu_path, platform=None, proc=None):
         try:
@@ -504,7 +543,7 @@ class WingosyWatcher(QThread):
                     region = "USA"
 
                 card_dir = gc_base / region / "Card A"
-                print(f"[Dolphin] Card dir: {card_dir} (exists={card_dir.exists()})")
+                logging.info(f"[Dolphin] Card dir: {card_dir} (exists={card_dir.exists()})")
                 
                 # Use special marker for mtime-based detection
                 return str(card_dir), "gc_card"
@@ -581,7 +620,7 @@ class WingosyWatcher(QThread):
                 path = res['state'] if save_mode == "state" else res['srm']
                 return path, False
         except Exception as e:
-            self.log_signal.emit(f"⚠️ Error resolving save path: {e}")
+            logging.error(f"⚠️ Error resolving save path: {e}")
         return None
 
     def get_retroarch_save_path(self, game, emu_data):
@@ -594,92 +633,110 @@ class WingosyWatcher(QThread):
             "psp_folder": str or None
         }
         """
-        from src.platforms import RETROARCH_CORES, RETROARCH_CORE_SAVE_FOLDERS
-        ra_exe = emu_data.get("path", "")
-        if not ra_exe:
-            return None
+        try:
+            from src.platforms import RETROARCH_CORES, RETROARCH_CORE_SAVE_FOLDERS
+            ra_exe = emu_data.get("path", "")
+            if not ra_exe:
+                return None
 
-        ra_dir = Path(ra_exe).parent
-        platform_slug = game.get("platform_slug", "")
+            ra_dir = Path(ra_exe).parent
+            platform_slug = game.get("platform_slug", "")
 
-        # PSP: always folder-based SAVEDATA
-        if platform_slug in ("psp", "playstation-portable"):
-            psp_saves = ra_dir / "saves" / "PPSSPP" / "PSP" / "SAVEDATA"
+            # PSP: always folder-based SAVEDATA
+            if platform_slug in ("psp", "playstation-portable"):
+                psp_saves = ra_dir / "saves" / "PPSSPP" / "PSP" / "SAVEDATA"
+                rom_name = game.get("fs_name", game.get("name", ""))
+                base_name = Path(rom_name).stem
+                state_path = ra_dir / "states" / "PPSSPP" / f"{base_name}.state.auto"
+                return {
+                    "srm": str(psp_saves),
+                    "state": str(state_path),
+                    "is_folder": True,
+                    "psp_folder": str(psp_saves)
+                }
+
+            core_dll = RETROARCH_CORES.get(platform_slug, "")
+            if not core_dll:
+                return None
+
+            core_name = (core_dll.replace(".dll", "").replace(".so", "")
+                                  .replace("_libretro", ""))
+            save_folder_name = RETROARCH_CORE_SAVE_FOLDERS.get(core_name, core_name)
+
             rom_name = game.get("fs_name", game.get("name", ""))
             base_name = Path(rom_name).stem
-            state_path = ra_dir / "states" / "PPSSPP" / f"{base_name}.state.auto"
-            return {
-                "srm": str(psp_saves),
-                "state": str(state_path),
-                "is_folder": True,
-                "psp_folder": str(psp_saves)
-            }
 
-        core_dll = RETROARCH_CORES.get(platform_slug, "")
-        if not core_dll:
+            srm_path = ra_dir / "saves" / save_folder_name / f"{base_name}.srm"
+            state_path = ra_dir / "states" / save_folder_name / f"{base_name}.state.auto"
+
+            return {
+                "srm": str(srm_path),
+                "state": str(state_path),
+                "is_folder": False,
+                "psp_folder": None
+            }
+        except Exception as e:
+            logging.error(f"[Watcher] get_retroarch_save_path error: {e}")
             return None
 
-        core_name = (core_dll.replace(".dll", "").replace(".so", "")
-                              .replace("_libretro", ""))
-        save_folder_name = RETROARCH_CORE_SAVE_FOLDERS.get(core_name, core_name)
-
-        rom_name = game.get("fs_name", game.get("name", ""))
-        base_name = Path(rom_name).stem
-
-        srm_path = ra_dir / "saves" / save_folder_name / f"{base_name}.srm"
-        state_path = ra_dir / "states" / save_folder_name / f"{base_name}.state.auto"
-
-        return {
-            "srm": str(srm_path),
-            "state": str(state_path),
-            "is_folder": False,
-            "psp_folder": None
-        }
-
     def handle_exit(self, data):
+        rom_id = data.get('rom_id')
+        title = data.get('title')
+        
+        # Guard against persistent failure for a specific game
+        if rom_id and self.session_errors.get(str(rom_id), 0) >= 5:
+            logging.warning(f"[Watcher] Giving up on save sync for {title} after 5 consecutive errors")
+            return
+
         try:
-            self.log_signal.emit(f"🛑 Session Ended: {data['title']}")
+            self.log_signal.emit(f"🛑 Session Ended: {title}")
             
             # Special case for Dolphin GC card sync (mtime-based GCI detection)
             gc_card_dir = data.get('gc_card_dir')
             if gc_card_dir:
-                session_start = data.get('initial_mtime', 0)
-                card_path = Path(gc_card_dir)
-                
-                # Find .gci files modified AFTER session started
-                changed_gcis = []
-                if card_path.exists():
-                    for gci in card_path.glob("*.gci"):
+                try:
+                    session_start = data.get('initial_mtime', 0)
+                    card_path = Path(gc_card_dir)
+                    
+                    # Find .gci files modified AFTER session started
+                    changed_gcis = []
+                    if card_path.exists():
+                        for gci in card_path.glob("*.gci"):
+                            try:
+                                if gci.stat().st_mtime > session_start:
+                                    changed_gcis.append(gci)
+                            except Exception:
+                                pass
+                    
+                    logging.info(f"[Dolphin] Session start: {session_start}")
+                    logging.info(f"[Dolphin] Changed GCIs: {[f.name for f in changed_gcis]}")
+                    
+                    if changed_gcis:
+                        self.log_signal.emit(f"📝 {len(changed_gcis)} GCI file(s) changed. Syncing...")
+                        temp_zip = str(self.tmp_dir / f"sync_{data['rom_id']}.zip")
                         try:
-                            if gci.stat().st_mtime > session_start:
-                                changed_gcis.append(gci)
-                        except Exception:
-                            pass
-                
-                print(f"[Dolphin] Session start: {session_start}")
-                print(f"[Dolphin] Changed GCIs: {[f.name for f in changed_gcis]}")
-                
-                if changed_gcis:
-                    self.log_signal.emit(f"📝 {len(changed_gcis)} GCI file(s) changed. Syncing...")
-                    temp_zip = str(self.tmp_dir / f"sync_{data['rom_id']}.zip")
-                    try:
-                        with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
-                            for gci in changed_gcis:
-                                zf.write(str(gci), gci.name)
-                        success, msg = self.client.upload_save(data['rom_id'], data['emu'], temp_zip)
-                        if success:
-                            self.log_signal.emit("✨ Sync Complete!")
-                            # Clear cache entry to force re-pull on next launch
-                            self.sync_cache.pop(str(data['rom_id']), None)
-                            self.save_cache()
-                        else:
-                            self.log_signal.emit(f"❌ Sync Failed: {msg}")
-                    finally:
-                        if os.path.exists(temp_zip):
-                            try: os.remove(temp_zip)
-                            except: pass
-                else:
-                    self.log_signal.emit(f"⏭️ No changes in {data['title']}. Skipping sync.")
+                            with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+                                for gci in changed_gcis:
+                                    zf.write(str(gci), gci.name)
+                            success, msg = self.client.upload_save(data['rom_id'], data['emu'], temp_zip)
+                            if success:
+                                self.log_signal.emit("✨ Sync Complete!")
+                                # Clear cache entry to force re-pull on next launch
+                                self.sync_cache.pop(str(data['rom_id']), None)
+                                self.save_cache()
+                                self.session_errors[str(rom_id)] = 0 # Success!
+                            else:
+                                self.log_signal.emit(f"❌ Sync Failed: {msg}")
+                                self.session_errors[str(rom_id)] = self.session_errors.get(str(rom_id), 0) + 1
+                        finally:
+                            if os.path.exists(temp_zip):
+                                try: os.remove(temp_zip)
+                                except: pass
+                    else:
+                        self.log_signal.emit(f"⏭️ No changes in {data['title']}. Skipping sync.")
+                except Exception as e:
+                    logging.error(f"[Watcher] Dolphin GC sync failed: {e}")
+                    self.session_errors[str(rom_id)] = self.session_errors.get(str(rom_id), 0) + 1
                 
                 self._update_playtime(data)
                 return
@@ -695,22 +752,30 @@ class WingosyWatcher(QThread):
                 return
             
             # Capture hash IMMEDIATELY at process exit
-            if is_retroarch and data.get('is_folder'):
-                h_at_exit = self._safe_folder_hash(data['save_path'])
-            elif is_retroarch:
-                h_at_exit = self._hash_retroarch_game(str(save_path), data['is_folder'])
-            else:
-                h_at_exit = calculate_folder_hash(str(save_path)) if data['is_folder'] else calculate_file_hash(str(save_path))
+            try:
+                if is_retroarch and data.get('is_folder'):
+                    h_at_exit = self._safe_folder_hash(data['save_path'])
+                elif is_retroarch:
+                    h_at_exit = self._hash_retroarch_game(str(save_path), data['is_folder'])
+                else:
+                    h_at_exit = calculate_folder_hash(str(save_path)) if data['is_folder'] else calculate_file_hash(str(save_path))
+            except Exception as e:
+                logging.error(f"[Watcher] Failed to capture hash at exit for {title}: {e}")
+                h_at_exit = None
             
             # Give emulator a moment to finish writing buffered files to disk
             time.sleep(3)
             
-            if is_retroarch and data.get('is_folder'):
-                new_h = self._safe_folder_hash(data['save_path'])
-            elif is_retroarch:
-                new_h = self._hash_retroarch_game(str(save_path), data['is_folder'])
-            else:
-                new_h = calculate_folder_hash(str(save_path)) if data['is_folder'] else calculate_file_hash(str(save_path))
+            try:
+                if is_retroarch and data.get('is_folder'):
+                    new_h = self._safe_folder_hash(data['save_path'])
+                elif is_retroarch:
+                    new_h = self._hash_retroarch_game(str(save_path), data['is_folder'])
+                else:
+                    new_h = calculate_folder_hash(str(save_path)) if data['is_folder'] else calculate_file_hash(str(save_path))
+            except Exception as e:
+                logging.error(f"[Watcher] Failed to capture new hash for {title}: {e}")
+                new_h = None
             
             initial_h = data.get('initial_hash')
             
@@ -735,6 +800,8 @@ class WingosyWatcher(QThread):
                 state_mtime_changed = (
                     current_state_mtime > data.get('initial_state_mtime', 0))
 
+            logging.debug(f"[Watcher] {data['title']} exit check: mtime_changed={mtime_changed} hash_changed={has_hash_changed} state_changed={state_mtime_changed}")
+
             if not has_hash_changed and not mtime_changed and not state_mtime_changed:
                 self.log_signal.emit(f"⏭️ No changes in {data['title']}. Skipping sync.")
                 return
@@ -744,6 +811,7 @@ class WingosyWatcher(QThread):
 
             self.log_signal.emit(f"📝 Changes detected! Syncing...")
             
+            success_overall = True
             if is_retroarch and psp_folder:
                 # === PSP Folder Mode: Upload SAVEDATA zip + State file ===
                 rom_id = data['rom_id']
@@ -759,18 +827,29 @@ class WingosyWatcher(QThread):
                             self.log_signal.emit("✨ SAVEDATA synced!")
                             entry = self.sync_cache.get(str(rom_id))
                             if isinstance(entry, dict): entry.pop('save_updated_at', None)
-                        else: self.log_signal.emit(f"❌ SAVEDATA sync failed: {msg}")
+                        else: 
+                            self.log_signal.emit(f"❌ SAVEDATA sync failed: {msg}")
+                            success_overall = False
+                    except Exception as e:
+                        logging.error(f"[Watcher] PSP SAVEDATA sync error: {e}")
+                        success_overall = False
                     finally:
                         if os.path.exists(temp_zip): os.remove(temp_zip)
 
                 # 2. Upload State File if it changed
                 if state_p and os.path.exists(state_p) and state_mtime_changed:
-                    ok, msg = self.client.upload_state(rom_id, emu, str(state_p), slot="wingosy-state")
-                    if ok:
-                        self.log_signal.emit("✨ State synced!")
-                        entry = self.sync_cache.get(str(rom_id))
-                        if isinstance(entry, dict): entry.pop('state_updated_at', None)
-                    else: self.log_signal.emit(f"❌ State sync failed: {msg}")
+                    try:
+                        ok, msg = self.client.upload_state(rom_id, emu, str(state_p), slot="wingosy-state")
+                        if ok:
+                            self.log_signal.emit("✨ State synced!")
+                            entry = self.sync_cache.get(str(rom_id))
+                            if isinstance(entry, dict): entry.pop('state_updated_at', None)
+                        else: 
+                            self.log_signal.emit(f"❌ State sync failed: {msg}")
+                            success_overall = False
+                    except Exception as e:
+                        logging.error(f"[Watcher] PSP State sync error: {e}")
+                        success_overall = False
                 
                 self.save_cache()
 
@@ -782,30 +861,42 @@ class WingosyWatcher(QThread):
                 state_p = data.get('state_path')
 
                 # Upload SRM
-                if srm_p and Path(srm_p).exists():
-                    ok, msg = self.client.upload_save(rom_id, emu, str(srm_p), slot="wingosy-srm", raw=True)
-                    if ok: 
-                        self.log_signal.emit("✨ SRM synced!")
-                        # Remove specific field from new cache format
-                        entry = self.sync_cache.get(str(rom_id))
-                        if isinstance(entry, dict):
-                            entry.pop('save_updated_at', None)
-                        else:
-                            self.sync_cache.pop(f"{rom_id}:save", None) # Legacy
-                    else: self.log_signal.emit(f"❌ SRM sync failed: {msg}")
+                if srm_p and Path(srm_p).exists() and savedata_changed:
+                    try:
+                        ok, msg = self.client.upload_save(rom_id, emu, str(srm_p), slot="wingosy-srm", raw=True)
+                        if ok: 
+                            self.log_signal.emit("✨ SRM synced!")
+                            # Remove specific field from new cache format
+                            entry = self.sync_cache.get(str(rom_id))
+                            if isinstance(entry, dict):
+                                entry.pop('save_updated_at', None)
+                            else:
+                                self.sync_cache.pop(f"{rom_id}:save", None) # Legacy
+                        else: 
+                            self.log_signal.emit(f"❌ SRM sync failed: {msg}")
+                            success_overall = False
+                    except Exception as e:
+                        logging.error(f"[Watcher] SRM sync error: {e}")
+                        success_overall = False
 
                 # Upload State
-                if state_p and Path(state_p).exists():
-                    ok, msg = self.client.upload_state(rom_id, emu, str(state_p), slot="wingosy-state")
-                    if ok: 
-                        self.log_signal.emit("✨ State synced!")
-                        # Remove specific field from new cache format
-                        entry = self.sync_cache.get(str(rom_id))
-                        if isinstance(entry, dict):
-                            entry.pop('state_updated_at', None)
-                        else:
-                            self.sync_cache.pop(f"{rom_id}:state", None) # Legacy
-                    else: self.log_signal.emit(f"❌ State sync failed: {msg}")
+                if state_p and Path(state_p).exists() and state_mtime_changed:
+                    try:
+                        ok, msg = self.client.upload_state(rom_id, emu, str(state_p), slot="wingosy-state")
+                        if ok: 
+                            self.log_signal.emit("✨ State synced!")
+                            # Remove specific field from new cache format
+                            entry = self.sync_cache.get(str(rom_id))
+                            if isinstance(entry, dict):
+                                entry.pop('state_updated_at', None)
+                            else:
+                                self.sync_cache.pop(f"{rom_id}:state", None) # Legacy
+                        else: 
+                            self.log_signal.emit(f"❌ State sync failed: {msg}")
+                            success_overall = False
+                    except Exception as e:
+                        logging.error(f"[Watcher] State sync error: {e}")
+                        success_overall = False
                 
                 self.save_cache()
             else:
@@ -823,15 +914,27 @@ class WingosyWatcher(QThread):
                         self.log_signal.emit("✨ Sync Complete!")
                         self.sync_cache.pop(str(data['rom_id']), None)
                         self.save_cache()
-                    else: self.log_signal.emit(f"❌ Sync Failed: {msg}")
+                    else: 
+                        self.log_signal.emit(f"❌ Sync Failed: {msg}")
+                        success_overall = False
+                except Exception as e:
+                    logging.error(f"[Watcher] Standard sync error: {e}")
+                    success_overall = False
                 finally:
                     if os.path.exists(temp_zip):
                         try: os.remove(temp_zip)
                         except: pass
             
+            if success_overall:
+                self.session_errors[str(rom_id)] = 0
+            else:
+                self.session_errors[str(rom_id)] = self.session_errors.get(str(rom_id), 0) + 1
+
             # Playtime tracking
             self._update_playtime(data)
-        except Exception as e: self.log_signal.emit(f"❌ Error during sync: {e}")
+        except Exception as e: 
+            logging.error(f"❌ Error during sync: {e}\n{traceback.format_exc()}")
+            self.session_errors[str(rom_id)] = self.session_errors.get(str(rom_id), 0) + 1
 
     def _update_playtime(self, data):
         """Update session and total playtime."""
@@ -848,4 +951,4 @@ class WingosyWatcher(QThread):
             playtime_data[rid_str] = new_total
             with open(playtime_path, 'w') as f: json.dump(playtime_data, f)
             self.log_signal.emit(f"🕐 Session: {session_minutes:.1f} min | Total: {new_total:.1f} min")
-        except Exception as e: print(f"[Watcher] Playtime error: {e}")
+        except Exception as e: logging.error(f"[Watcher] Playtime error: {e}")

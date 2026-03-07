@@ -7,6 +7,7 @@ import pytest
 import sys
 import os
 import unittest
+from unittest.mock import MagicMock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.platforms import (RETROARCH_PLATFORMS, RETROARCH_CORES,
@@ -565,6 +566,108 @@ class TestRegressions:
         
         # Cleanup temp
         shutil.rmtree(str(tmp), ignore_errors=True)
+
+
+class TestWatcherResilience:
+    def setup_method(self):
+        from tests.dummy import DummyRomMClient
+        from src.config import ConfigManager
+        from src.watcher import WingosyWatcher
+        self.client = DummyRomMClient()
+        self.config = ConfigManager()
+        # Create watcher without starting thread
+        self.watcher = WingosyWatcher.__new__(WingosyWatcher)
+        self.watcher.client = self.client
+        self.watcher.config = self.config
+        self.watcher.session_errors = {}
+        self.watcher.active_sessions = {}
+        self.watcher.running = True
+        # Stub log_signal
+        self.watcher.log_signal = MagicMock()
+
+    def test_watcher_continues_after_resolve_error(self):
+        """Test that track_session handles resolve_save_path exceptions."""
+        from unittest.mock import MagicMock
+        proc = MagicMock()
+        proc.pid = 123
+        game_data = {"id": 1, "name": "Test Game", "platform_slug": "snes"}
+        
+        # Mock resolve_save_path to raise
+        self.watcher.resolve_save_path = MagicMock(side_effect=Exception("Hard drive exploded"))
+        
+        # Should not raise
+        self.watcher.track_session(proc, "Snes9x", game_data, "test.sfc", "snes9x.exe")
+        
+        # PID should NOT be in active_sessions because setup failed
+        assert 123 not in self.watcher.active_sessions
+
+    def test_error_counter_stops_at_five(self):
+        """Test that handle_exit stops syncing after 5 consecutive errors."""
+        import logging
+        from unittest.mock import patch
+        
+        data = {
+            "rom_id": 1,
+            "title": "Broken Game",
+            "emu": "Snes9x",
+            "save_path": "fake.srm",
+            "is_folder": False
+        }
+        
+        # Force 5 errors
+        self.watcher.session_errors["1"] = 5
+        
+        with patch("logging.warning") as mock_warn:
+            self.watcher.handle_exit(data)
+            mock_warn.assert_called_with("[Watcher] Giving up on save sync for Broken Game after 5 consecutive errors")
+
+    def test_error_counter_resets_on_success(self, tmp_path):
+        """Test that error counter resets to 0 after a successful sync."""
+        from unittest.mock import MagicMock
+        import os
+        
+        save_file = tmp_path / "test.srm"
+        save_file.write_text("data")
+        
+        data = {
+            "rom_id": 1,
+            "title": "Good Game",
+            "emu": "Snes9x",
+            "save_path": str(save_file),
+            "is_folder": False,
+            "initial_hash": "old-hash", # Force change detection
+            "start_time": 0
+        }
+        
+        self.watcher.session_errors["1"] = 3
+        self.watcher.sync_cache = {}
+        self.watcher.tmp_dir = tmp_path / "tmp"
+        self.watcher.tmp_dir.mkdir()
+        
+        # Mock successful upload
+        self.client.upload_save = MagicMock(return_value=(True, "ok"))
+        self.watcher.save_cache = MagicMock()
+        
+        self.watcher.handle_exit(data)
+        
+        assert self.watcher.session_errors["1"] == 0
+
+
+class TestLogging:
+    def test_log_level_set_from_config(self):
+        """Test that main.py logic for setting log level works."""
+        import logging
+        from src.config import ConfigManager
+        config = ConfigManager()
+        
+        for level in ["DEBUG", "INFO", "WARNING", "ERROR"]:
+            config.data["log_level"] = level
+            log_level_str = config.get("log_level", "INFO").upper()
+            target_level = getattr(logging, log_level_str)
+            
+            # Simulate main.py logic
+            logging.getLogger().setLevel(target_level)
+            assert logging.getLogger().getEffectiveLevel() == target_level
 
 
 # ── Live Connection ───────────────────────────────────────────────────────

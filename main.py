@@ -94,6 +94,12 @@ def main():
     
     config = ConfigManager()
     
+    # Set log level from config
+    log_level_str = config.get("log_level", "INFO").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+    logging.getLogger().setLevel(log_level)
+    logging.info(f"Log level set to {log_level_str}")
+    
     # Attempt login with token first if available (loaded from keyring by client)
     client = RomMClient(config.get("host"), config=config)
     

@@ -312,6 +312,18 @@ class SettingsDialog(QDialog):
         tooltip.setWordWrap(True)
         self.settings_layout.addWidget(tooltip)
         
+        # Log level setting
+        log_level_layout = QHBoxLayout()
+        log_level_layout.addWidget(QLabel("<b>Log Level:</b>"))
+        self.log_level_combo = QComboBox()
+        self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
+        current_level = self.config.get("log_level", "INFO").upper()
+        self.log_level_combo.setCurrentText(current_level)
+        self.log_level_combo.currentTextChanged.connect(self.set_log_level)
+        log_level_layout.addWidget(self.log_level_combo)
+        log_level_layout.addStretch()
+        self.settings_layout.addLayout(log_level_layout)
+        
         self.settings_layout.addWidget(QLabel("<b>Preferred Switch Emulator:</b>"))
         self.switch_pref = QComboBox()
         self.switch_pref.addItems(["Switch (Eden)", "Switch (Yuzu)"])
@@ -459,6 +471,12 @@ class SettingsDialog(QDialog):
         self.config.set("cards_per_row", value)
         lib = self.main_window.library_tab
         lib._resize_all_cards()
+
+    def set_log_level(self, text):
+        self.config.set("log_level", text)
+        level = getattr(logging, text.upper(), logging.INFO)
+        logging.getLogger().setLevel(level)
+        logging.info(f"Log level changed to {text}")
 
     def set_ra_save_mode(self, text):
         mode_map = {"SRM only": "srm", "States only": "state", "Both": "both"}
