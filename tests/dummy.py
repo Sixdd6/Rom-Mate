@@ -215,6 +215,9 @@ class DummyRomMClient:
     def get_latest_save(self, rom_id):
         return None  # no cloud saves in dummy mode
 
+    def get_save_by_slot(self, rom_id, slot):
+        return None
+
     def download_save(self, save_item, target_path, thread=None):
         return False
 

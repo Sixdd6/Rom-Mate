@@ -17,10 +17,10 @@ class WingosyWatcher(QThread):
     conflict_signal = Signal(str, str, str, str) # title, local_path, temp_dl, rom_id
     notify_signal = Signal(str, str) # title, msg
 
-    def __init__(self, client, config_manager):
+    def __init__(self, client, config):
         super().__init__()
         self.client = client
-        self.config = config_manager
+        self.config = config
         self.running = True
         self.active_sessions = {}
         self.skip_next_pull_rom_id = None # Flag to prevent double-pull when launching from app

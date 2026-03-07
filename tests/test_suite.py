@@ -372,12 +372,16 @@ class TestRetroArchCfg:
         """SRM path resolves correctly for SNES game."""
         from src.platforms import RETROARCH_CORES
         from src.watcher import WingosyWatcher
+        from src.config import ConfigManager
         # Minimal fake emu_data
         emu_data = {"path": "F:/EMULATORS/retroarch/"
                             "RetroArch-Win64/retroarch.exe"}
         game = {"fs_name": "SuperMarioWorld.sfc",
                 "platform_slug": "snes"}
         w = WingosyWatcher.__new__(WingosyWatcher)
+        w.config = ConfigManager()
+        # Ensure mode is srm for 2-tuple return
+        w.config.data["retroarch_save_mode"] = "srm"
         path, is_folder = w.get_retroarch_save_path(game, emu_data)
         assert path is not None
         assert "Snes9x" in path or "snes" in path.lower()
@@ -391,7 +395,11 @@ class TestRetroArchCfg:
         game = {"fs_name": "Persona3.iso",
                 "platform_slug": "psp"}
         from src.watcher import WingosyWatcher
+        from src.config import ConfigManager
         w = WingosyWatcher.__new__(WingosyWatcher)
+        w.config = ConfigManager()
+        # Mode doesn't matter for PSP, but let's be consistent
+        w.config.data["retroarch_save_mode"] = "srm"
         path, is_folder = w.get_retroarch_save_path(game, emu_data)
         assert path is not None
         assert "PPSSPP" in path
