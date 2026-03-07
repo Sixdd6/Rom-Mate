@@ -359,28 +359,21 @@ class SettingsDialog(QDialog):
             return
         self.test_conn_btn.setText("Testing...")
         self.test_conn_btn.setEnabled(False)
-        # Temporarily override host for test
-        import requests
-        try:
-            verify = os.environ.get('REQUESTS_CA_BUNDLE', True)
-            r = requests.get(
-                f"{host.rstrip('/')}/api/roms?limit=1&offset=0",
-                headers=self.main_window.client.get_auth_headers(),
-                timeout=5,
-                verify=verify
-            )
-            success = r.status_code == 200
-        except Exception:
-            success = False
+        
+        # Use the unified test_connection method from the client with retry feedback
+        success, message = self.main_window.client.test_connection(
+            host_override=host,
+            retry_callback=lambda: self.test_conn_btn.setText("Retrying (slow server)...")
+        )
+        
         self.test_conn_btn.setText("Test Connection")
         self.test_conn_btn.setEnabled(True)
         if success:
             QMessageBox.information(self, "Success",
-                "Connection successful! Click 'Apply & Reconnect' to use this host.")
+                f"{message} Click 'Apply & Reconnect' to use this host.")
             self.reconnect_btn.setVisible(True)
         else:
-            QMessageBox.warning(self, "Failed",
-                "Could not connect to that host. Check the URL and port.")
+            QMessageBox.warning(self, "Failed", message)
             self.reconnect_btn.setVisible(False)
 
     def _apply_and_restart(self):

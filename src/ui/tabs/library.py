@@ -420,6 +420,17 @@ class LibraryTab(QWidget):
             "font-size: 12px; border-radius: 4px;")
         self._banner_label.setVisible(True)
 
+    def show_slow_connection_banner(self):
+        if not hasattr(self, '_banner_label'):
+            self.show_connecting_banner()
+        self._banner_label.setText(
+            "  🐢  Server is slow to respond, retrying with longer timeout... "
+            "(This may take a few minutes on first launch)")
+        self._banner_label.setStyleSheet(
+            "background: #e65100; color: white; "
+            "font-size: 12px; border-radius: 4px;")
+        self._banner_label.setVisible(True)
+
     def show_connection_failed_banner(self):
         if not hasattr(self, '_banner_label'):
             self.show_connecting_banner()

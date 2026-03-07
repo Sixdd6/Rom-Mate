@@ -24,19 +24,26 @@ from src.platforms import RETROARCH_PLATFORMS, platform_matches
 class LibraryFetchWorker(QThread):
     finished = Signal(object)  # emits the result (list or "REAUTH_REQUIRED")
     error = Signal()           # emitted on network failure
+    retrying = Signal()        # emitted on Stage 1 timeout
     def __init__(self, client, cached_non_empty=False):
         super().__init__()
         self.client = client
         self.cached_non_empty = cached_non_empty
     def run(self):
         try:
-            result = self.client.fetch_library()
+            result = self.client.fetch_library(retry_callback=lambda: self.retrying.emit())
         except Exception:
-            result = []
+            result = None
         
+        if result is None:
+            self.error.emit()
+            return
+
         if isinstance(result, list):
             if not result and self.cached_non_empty:
-                self.error.emit()
+                # If we had a cache but now it's empty, it might be an error or genuine empty.
+                # But fetch_library returning None is our explicit error signal now.
+                self.finished.emit([])
             elif not result:
                 # Empty but no cache to compare — just finish
                 self.finished.emit([])
@@ -179,24 +186,11 @@ class WingosyMainWindow(QMainWindow):
         self._fetch_thread = LibraryFetchWorker(self.client, cached_non_empty=cached_non_empty)
         self._fetch_thread.finished.connect(self._on_library_fetched)
         self._fetch_thread.error.connect(lambda: self.library_tab.show_connection_failed_banner())
+        self._fetch_thread.retrying.connect(self.library_tab.show_slow_connection_banner)
         self._fetch_thread.start()
-
-        # 8 second timeout
-        self._connect_timeout = QTimer()
-        self._connect_timeout.setSingleShot(True)
-        self._connect_timeout.setInterval(8000)
-        self._connect_timeout.timeout.connect(self._on_connect_timeout)
-        self._connect_timeout.start()
-
-    def _on_connect_timeout(self):
-        # Only fire if worker hasn't completed yet and no games loaded (even from cache)
-        if not self._library_fetch_done and not self.all_games:
-            self.library_tab.show_connection_failed_banner()
 
     def _on_library_fetched(self, res):
         self._library_fetch_done = True
-        if hasattr(self, '_connect_timeout'):
-            self._connect_timeout.stop()
         self.library_tab.hide_banner()
         self.library_tab.refresh_btn.setEnabled(True)
         
