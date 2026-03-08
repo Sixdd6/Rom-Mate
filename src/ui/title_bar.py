@@ -175,17 +175,3 @@ class WingosyTitleBar(QWidget):
 
     def _close(self):
         self.window().close()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.window().frameGeometry().topLeft()
-            event.accept()
-
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.LeftButton and self._drag_pos:
-            self.window().move(event.globalPosition().toPoint() - self._drag_pos)
-            event.accept()
-
-    def mouseDoubleClickEvent(self, event):
-        self._maximize_restore()
-        event.accept()

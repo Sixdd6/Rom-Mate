@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QMessageBox, QDialog, QLineEdit, QDialogButtonBox, 
                              QScrollArea)
 from PySide6.QtGui import QIcon, QPixmap, QKeySequence, QShortcut
-from PySide6.QtCore import Qt, QSettings, Slot, Signal, QThread, QTimer, QEvent
+from PySide6.QtCore import Qt, QSettings, Slot, Signal, QThread, QTimer, QEvent, QPoint
 
 from src.ui.threads import (ImageFetcher, BiosDownloader, DolphinDownloader, 
                             DirectDownloader, GithubDownloader, ConflictResolveThread)
@@ -78,13 +78,14 @@ class WingosyMainWindow(QMainWindow):
         self.fetch_generation = 0
         self.all_games = []
         
-        # Frameless window setup
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        
+        # Custom window frame setup
+        self.setWindowFlags(Qt.Window)
+
+        # After window is shown, call Windows API to remove title bar but keep resize border
+        QTimer.singleShot(0, self._apply_windows_frame)
+
         self.setWindowTitle("Wingosy Launcher")
         self.resize(1100, 800)
-        
         settings = QSettings("Wingosy", "WingosyLauncher")
         geometry = settings.value("geometry")
         if geometry:
@@ -686,3 +687,110 @@ class WingosyMainWindow(QMainWindow):
             event.ignore()
         else:
             event.accept()
+
+    def _apply_windows_frame(self):
+        import sys
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            import ctypes.wintypes as wintypes
+            
+            hwnd = int(self.winId())
+            
+            # MARGINS struct — extend frame into client area on all sides by 1px
+            # This removes title bar but keeps the resize border and snap behavior
+            class MARGINS(ctypes.Structure):
+                _fields_ = [
+                    ("cxLeftWidth",    ctypes.c_int),
+                    ("cxRightWidth",   ctypes.c_int),
+                    ("cyTopHeight",    ctypes.c_int),
+                    ("cyBottomHeight", ctypes.c_int),
+                ]
+            
+            margins = MARGINS(0, 0, 1, 0)
+            ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(
+                hwnd, ctypes.byref(margins))
+            
+            # Remove WS_CAPTION but keep WS_THICKFRAME for resize
+            GWL_STYLE = -16
+            WS_CAPTION     = 0x00C00000
+            WS_THICKFRAME  = 0x00040000
+            WS_SYSMENU     = 0x00080000
+            WS_MAXIMIZEBOX = 0x00010000
+            WS_MINIMIZEBOX = 0x00020000
+            
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+            # Remove caption, keep thick frame
+            style = style & ~WS_CAPTION
+            style = style | WS_THICKFRAME
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+            
+            # Force Windows to redraw the frame
+            SWP_FLAGS = (0x0020 |  # SWP_FRAMECHANGED
+                         0x0002 |  # SWP_NOMOVE
+                         0x0001 |  # SWP_NOSIZE
+                         0x0004)   # SWP_NOZORDER
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FLAGS)
+                
+        except Exception as e:
+            logging.warning(f"[Frame] Windows frame setup failed: {e}")
+
+    def nativeEvent(self, eventType, message):
+        import ctypes
+        import ctypes.wintypes as wintypes
+        
+        if eventType == b"windows_generic_MSG":
+            msg = ctypes.wintypes.MSG.from_address(int(message))
+            
+            WM_NCCALCSIZE = 0x0083
+            WM_NCHITTEST  = 0x0084
+            
+            if msg.message == WM_NCCALCSIZE:
+                # Return 0 to indicate that the client area covers the entire window
+                return True, 0
+                
+            if msg.message == WM_NCHITTEST:
+                # Handle hit testing for custom title bar and resize borders
+                def LOWORD(l): return l & 0xFFFF
+                def HIWORD(l): return (l >> 16) & 0xFFFF
+                
+                x = LOWORD(msg.lParam)
+                y = HIWORD(msg.lParam)
+                
+                # Convert screen coordinates to window coordinates
+                pos = self.mapFromGlobal(QPoint(x, y))
+                
+                # Check for resize borders (8px)
+                edges = self._get_edge(pos)
+                
+                HTLEFT        = 10
+                HTRIGHT       = 11
+                HTTOP         = 12
+                HTTOPLEFT     = 13
+                HTTOPRIGHT    = 14
+                HTBOTTOM      = 15
+                HTBOTTOMLEFT  = 16
+                HTBOTTOMRIGHT = 17
+                HTCAPTION     = 2
+                HTCLIENT      = 1
+                
+                if Qt.Edge.LeftEdge in edges and Qt.Edge.TopEdge in edges: return True, HTTOPLEFT
+                if Qt.Edge.RightEdge in edges and Qt.Edge.TopEdge in edges: return True, HTTOPRIGHT
+                if Qt.Edge.LeftEdge in edges and Qt.Edge.BottomEdge in edges: return True, HTBOTTOMLEFT
+                if Qt.Edge.RightEdge in edges and Qt.Edge.BottomEdge in edges: return True, HTBOTTOMRIGHT
+                if Qt.Edge.LeftEdge in edges: return True, HTLEFT
+                if Qt.Edge.RightEdge in edges: return True, HTRIGHT
+                if Qt.Edge.TopEdge in edges: return True, HTTOP
+                if Qt.Edge.BottomEdge in edges: return True, HTBOTTOM
+                
+                # Check if mouse is in title bar area (40px height)
+                if pos.y() < 40:
+                    # Check if over a button or other interactive widget in title bar
+                    child = self.title_bar.childAt(pos)
+                    if not child or child == self.title_bar:
+                        return True, HTCAPTION
+                
+                return True, HTCLIENT
+                
+        return super().nativeEvent(eventType, message)
