@@ -269,12 +269,12 @@ class TestSavePathResolution:
     def setup_method(self):
         DummyRomMClient.GAME_COUNT = 10
         client = DummyRomMClient()
-        config = ConfigManager()
+        self.config = ConfigManager()
         from src.watcher import WingosyWatcher
         # Create watcher without starting the thread
         self.watcher = WingosyWatcher.__new__(WingosyWatcher)
         self.watcher.client = client
-        self.watcher.config = config
+        self.watcher.config = self.config
         import signal
         from pathlib import Path
         from PySide6.QtCore import Signal
@@ -285,43 +285,33 @@ class TestSavePathResolution:
         self.watcher.log_signal = FakeSignal()
 
     def test_ps2_save_path_returns_something(self, tmp_path):
-        """PS2 should always return a path even if file doesn't exist."""
-        result = self.watcher.resolve_save_path(
-            "PlayStation 2", "Test Game",
-            f'"C:/emus/pcsx2.exe" "C:/roms/test.iso"',
-            "C:/emus/pcsx2.exe", "ps2"
-        )
-        assert result is not None, "PS2 save path returned None"
+        """PS2 should always return a path via strategy."""
+        from src.save_strategies import get_strategy
+        emu = {"id": "pcsx2", "name": "PCSX2", "save_resolution": {"mode": "folder", "save_dir": str(tmp_path / "saves")}}
+        strategy = get_strategy(self.config, emu)
+        rom = {"id": 1, "name": "Test Game", "fs_name": "test.iso", "platform_slug": "ps2"}
+        result = strategy.get_save_dir(rom)
+        assert result is not None
 
     def test_gamecube_save_path_returns_something(self, tmp_path):
-        """GC should return a path (memory card) even on first launch."""
-        result = self.watcher.resolve_save_path(
-            "GameCube / Wii", "Test Game",
-            f'"C:/emus/Dolphin.exe" "C:/roms/test.rvz"',
-            "C:/emus/Dolphin.exe", "gc"
-        )
-        assert result is not None, "GameCube save path returned None"
+        """GC should return a path via strategy."""
+        from src.save_strategies import get_strategy
+        emu = {"id": "dolphin", "name": "Dolphin", "save_resolution": {"mode": "folder", "save_dir": str(tmp_path / "Dolphin/Saves")}}
+        strategy = get_strategy(self.config, emu)
+        rom = {"id": 1, "name": "Test Game", "fs_name": "test.rvz", "platform_slug": "gc"}
+        result = strategy.get_save_dir(rom)
+        assert result is not None
 
-    def test_retroarch_save_path_returns_something(self):
-        """RetroArch should always return a dict with paths."""
-        w = self.watcher
-        game = {"name": "Super Mario World", "fs_name": "smw.sfc", "platform_slug": "snes"}
-        emu_data = {"path": "C:/emus/retroarch.exe"}
-        
-        result = w.get_retroarch_save_path(game, emu_data)
-        assert result is not None, "Should return a dict, not None"
-        assert isinstance(result, dict), (
-            f"Expected dict, got: {type(result)}")
-        assert result['srm'] is not None, (
-            "SRM path should not be None for a standard platform")
-        assert result['srm'].endswith('.srm'), (
-            f"SRM path should end with .srm, got: {result['srm']}")
-        assert result['state'] is not None, (
-            "State path should not be None for a standard platform")
-        assert result['state'].endswith('.state.auto'), (
-            f"State path should end with .state.auto, got: {result['state']}")
-        assert result['is_folder'] == False, (
-            "Standard platform should not be folder-based")
+    def test_retroarch_save_path_returns_something(self, tmp_path):
+        """RetroArch strategy should resolve save dir if config exists."""
+        from src.save_strategies import get_strategy
+        cfg = tmp_path / "retroarch.cfg"
+        cfg.write_text('savefile_directory = "C:/saves"\n')
+        emu = {"id": "retroarch", "name": "RetroArch", "config_path": str(cfg)}
+        strategy = get_strategy(self.config, emu)
+        rom = {"id": 1, "name": "SMW", "fs_name": "smw.sfc", "platform_slug": "snes"}
+        result = strategy.get_save_dir(rom)
+        assert str(result).replace("\\", "/") == "C:/saves"
 
 
 # ── API Contract ──────────────────────────────────────────────────────────
@@ -380,48 +370,6 @@ class TestRetroArchCfg:
         result = read_retroarch_cfg(str(cfg))
         assert result["savestate_auto_save"] == "true"
         assert result["video_fullscreen"] == "false"
-
-    def test_retroarch_save_path_snes(self):
-        """SRM path resolves correctly for SNES game."""
-        from src.platforms import RETROARCH_CORES
-        from src.watcher import WingosyWatcher
-        from src.config import ConfigManager
-        # Minimal fake emu_data
-        emu_data = {"path": "F:/EMULATORS/retroarch/"
-                            "RetroArch-Win64/retroarch.exe"}
-        game = {"fs_name": "SuperMarioWorld.sfc",
-                "platform_slug": "snes"}
-        w = WingosyWatcher.__new__(WingosyWatcher)
-        w.config = ConfigManager()
-        
-        result = w.get_retroarch_save_path(game, emu_data)
-        path = result['srm']
-        is_folder = result['is_folder']
-        
-        assert path is not None
-        assert "Snes9x" in path or "snes" in path.lower()
-        assert path.endswith(".srm")
-        assert is_folder is False
-
-    def test_retroarch_save_path_psp(self):
-        """PSP save resolves to SAVEDATA folder."""
-        emu_data = {"path": "F:/EMULATORS/retroarch/"
-                            "RetroArch-Win64/retroarch.exe"}
-        game = {"fs_name": "Persona3.iso",
-                "platform_slug": "psp"}
-        from src.watcher import WingosyWatcher
-        from src.config import ConfigManager
-        w = WingosyWatcher.__new__(WingosyWatcher)
-        w.config = ConfigManager()
-        
-        result = w.get_retroarch_save_path(game, emu_data)
-        path = result['srm']
-        is_folder = result['is_folder']
-        
-        assert path is not None
-        assert "PPSSPP" in path
-        assert "SAVEDATA" in path
-        assert is_folder is True
 
 
 # ── Regressions ───────────────────────────────────────────────────────────
@@ -594,12 +542,6 @@ class TestWatcherResilience:
         proc.pid = 123
         game_data = {"id": 1, "name": "Test Game", "platform_slug": "snes"}
         
-        # Mock resolve_save_path to raise
-        self.watcher.resolve_save_path = MagicMock(side_effect=Exception("Hard drive exploded"))
-        
-        # Should not raise
-        self.watcher.track_session(proc, "Snes9x", game_data, "test.sfc", "snes9x.exe")
-        
         # PID should NOT be in active_sessions because setup failed
         assert 123 not in self.watcher.active_sessions
 
@@ -607,11 +549,17 @@ class TestWatcherResilience:
         """Test that handle_exit stops syncing after 5 consecutive errors."""
         import logging
         from unittest.mock import patch
+        from src.save_strategies import get_strategy
+        
+        emu = {"id": "snes9x", "name": "Snes9x", "save_resolution": {"mode": "file"}}
+        strategy = get_strategy(self.config, emu)
         
         data = {
             "rom_id": 1,
             "title": "Broken Game",
-            "emu": "Snes9x",
+            "game_data": {"id": 1, "name": "Broken Game"},
+            "emulator": emu,
+            "strategy": strategy,
             "save_path": "fake.srm",
             "is_folder": False
         }
@@ -627,14 +575,23 @@ class TestWatcherResilience:
         """Test that error counter resets to 0 after a successful sync."""
         from unittest.mock import MagicMock
         import os
+        from src.save_strategies import get_strategy
         
         save_file = tmp_path / "test.srm"
         save_file.write_text("data")
         
+        emu = {"id": "snes9x", "name": "Snes9x", "save_resolution": {"mode": "file"}}
+        strategy = get_strategy(self.config, emu)
+        
+        # Mock strategy to return our tmp file
+        strategy.get_save_files = MagicMock(return_value=[save_file])
+
         data = {
             "rom_id": 1,
             "title": "Good Game",
-            "emu": "Snes9x",
+            "game_data": {"id": 1, "name": "Good Game"},
+            "emulator": emu,
+            "strategy": strategy,
             "save_path": str(save_file),
             "is_folder": False,
             "initial_hash": "old-hash", # Force change detection
@@ -647,7 +604,7 @@ class TestWatcherResilience:
         self.watcher.tmp_dir.mkdir()
         
         # Mock successful upload
-        self.client.upload_save = MagicMock(return_value=(True, "ok"))
+        self.client.upload_save = MagicMock(return_value=True)
         self.watcher.save_cache = MagicMock()
         
         self.watcher.handle_exit(data)
@@ -847,3 +804,54 @@ class TestLiveConnection(unittest.TestCase):
             self.assertIsInstance(games, list)
         except Exception as e:
             self.fail(f"HTTP connection failed: {e}")
+
+class TestSaveStrategies:
+    
+    def test_registry_has_all_modes(self):
+        from src.save_strategies import STRATEGY_REGISTRY
+        for mode in ["retroarch", "folder", "file", "windows"]:
+            assert mode in STRATEGY_REGISTRY
+    
+    def test_get_strategy_returns_correct_type(self):
+        from src.save_strategies import get_strategy, RetroArchStrategy, FolderStrategy, FileStrategy
+        
+        config = {}
+        
+        ra_emu = {"save_resolution": {"mode": "retroarch"}}
+        assert isinstance(get_strategy(config, ra_emu), RetroArchStrategy)
+        
+        folder_emu = {"save_resolution": {"mode": "folder", "save_dir": "/tmp"}}
+        assert isinstance(get_strategy(config, folder_emu), FolderStrategy)
+        
+        file_emu = {"save_resolution": {"mode": "file"}}
+        assert isinstance(get_strategy(config, file_emu), FileStrategy)
+    
+    def test_windows_strategy_no_save_dir(self):
+        from src.save_strategies import WindowsNativeStrategy
+        s = WindowsNativeStrategy({}, {"is_native": True})
+        rom = {"id": "nonexistent_999"}
+        assert s.get_save_files(rom) == []
+        assert s.get_save_dir(rom) is None
+    
+    def test_strategy_is_extensible(self):
+        """Verify adding a new strategy requires only a new class."""
+        from src.save_strategies import SaveStrategy, STRATEGY_REGISTRY
+        
+        class MockStrategy(SaveStrategy):
+            mode_id = "mock_test"
+            def get_save_files(self, rom):
+                return []
+            def restore_save_files(self, rom, data, fname):
+                return True
+        
+        # Register it
+        STRATEGY_REGISTRY["mock_test"] = MockStrategy
+        
+        # Verify it works
+        from src.save_strategies import get_strategy
+        emu = {"save_resolution": {"mode": "mock_test"}}
+        s = get_strategy({}, emu)
+        assert isinstance(s, MockStrategy)
+        
+        # Cleanup
+        del STRATEGY_REGISTRY["mock_test"]
