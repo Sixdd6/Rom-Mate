@@ -104,13 +104,6 @@ class WingosyMainWindow(QMainWindow):
         # 2. Then fetch fresh data in background
         QTimer.singleShot(500, self.fetch_library_and_populate)
 
-        # Edge resize support
-
-        self.setMouseTracking(True)
-        self.centralWidget().setMouseTracking(True)
-        self._resize_border = 8
-        self.installEventFilter(self)
-        
         if self.config.data.get("keyring_failed"):
             QMessageBox.warning(
                 self,
@@ -176,18 +169,6 @@ class WingosyMainWindow(QMainWindow):
         self.title_bar.set_active_tab(index)
 
     def eventFilter(self, obj, event):
-        # MUST call super() and return immediately for any object that isn't self
-        if obj is not self:
-            return super().eventFilter(obj, event)
-            
-        if (event.type() == QEvent.Type.MouseMove
-                and not self.isMaximized()):
-            try:
-                pos = event.position().toPoint()
-                edge = self._get_edge(pos)
-                self._update_cursor(edge)
-            except Exception:
-                pass
         return super().eventFilter(obj, event)
 
     def _load_library_from_cache(self):
@@ -221,52 +202,6 @@ class WingosyMainWindow(QMainWindow):
             logging.info(f"[Library] Cache loaded: {len(games)} games")
         except Exception as e:
             logging.warning(f"[Library] Cache load failed: {e}")
-
-    def _get_edge(self, pos):
-        edges = []
-        b = self._resize_border
-        if pos.x() < b:
-            edges.append(Qt.Edge.LeftEdge)
-        if pos.x() > self.width() - b:
-            edges.append(Qt.Edge.RightEdge)
-        if pos.y() < b:
-            edges.append(Qt.Edge.TopEdge)
-        if pos.y() > self.height() - b:
-            edges.append(Qt.Edge.BottomEdge)
-        return edges
-
-    def _update_cursor(self, edges):
-        left  = Qt.Edge.LeftEdge  in edges
-        right = Qt.Edge.RightEdge in edges
-        top   = Qt.Edge.TopEdge   in edges
-        bot   = Qt.Edge.BottomEdge in edges
-
-        if (left and top) or (right and bot):
-            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        elif (right and top) or (left and bot):
-            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
-        elif left or right:
-            self.setCursor(Qt.CursorShape.SizeHorCursor)
-        elif top or bot:
-            self.setCursor(Qt.CursorShape.SizeVerCursor)
-        else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-
-    def mousePressEvent(self, event):
-        if (event.button() == Qt.MouseButton.LeftButton
-                and not self.isMaximized()):
-            edges = self._get_edge(event.position().toPoint())
-            if edges:
-                combined = edges[0]
-                for e in edges[1:]:
-                    combined = combined | e
-                try:
-                    self.windowHandle().startSystemResize(combined)
-                    event.accept()
-                    return
-                except Exception:
-                    pass
-        super().mousePressEvent(event)
 
     def _on_image_fetched(self, fetcher, generation=None):
         if generation is not None and generation != self.fetch_generation:
@@ -708,7 +643,7 @@ class WingosyMainWindow(QMainWindow):
                     ("cyBottomHeight", ctypes.c_int),
                 ]
             
-            margins = MARGINS(0, 0, 1, 0)
+            margins = MARGINS(1, 1, 1, 1)
             ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(
                 hwnd, ctypes.byref(margins))
             
@@ -736,61 +671,110 @@ class WingosyMainWindow(QMainWindow):
         except Exception as e:
             logging.warning(f"[Frame] Windows frame setup failed: {e}")
 
+    def _get_drag_rect(self):
+        """Returns the screen rect of the draggable center area of the title bar."""
+        try:
+            tb = self.title_bar
+            # Drag zone is between status_text and lib_btn
+            left_widget = tb.status_text
+            right_widget = tb.nav_buttons[0] if tb.nav_buttons else tb.settings_btn
+            
+            left_x = left_widget.mapToGlobal(left_widget.rect().bottomRight()).x()
+            right_x = right_widget.mapToGlobal(right_widget.rect().bottomLeft()).x()
+            
+            top_y = tb.mapToGlobal(tb.rect().topLeft()).y()
+            bot_y = tb.mapToGlobal(tb.rect().bottomLeft()).y()
+            
+            return left_x, right_x, top_y, bot_y
+        except Exception:
+            return None
+
     def nativeEvent(self, eventType, message):
+        import sys
+        if sys.platform != "win32":
+            return super().nativeEvent(eventType, message)
+        
         import ctypes
         import ctypes.wintypes as wintypes
         
-        if eventType == b"windows_generic_MSG":
-            msg = ctypes.wintypes.MSG.from_address(int(message))
-            
-            WM_NCCALCSIZE = 0x0083
-            WM_NCHITTEST  = 0x0084
-            
-            if msg.message == WM_NCCALCSIZE:
-                # Return 0 to indicate that the client area covers the entire window
+        if eventType != b"windows_generic_MSG":
+            return super().nativeEvent(eventType, message)
+        
+        msg = ctypes.wintypes.MSG.from_address(int(message))
+        
+        WM_NCCALCSIZE = 0x0083
+        WM_NCHITTEST  = 0x0084
+        
+        if msg.message == WM_NCCALCSIZE:
+            if msg.wParam == 1:
                 return True, 0
+            return False, 0
+        
+        if msg.message == WM_NCHITTEST:
+            # Screen coordinates from lParam
+            x = ctypes.c_int16(msg.lParam & 0xFFFF).value
+            y = ctypes.c_int16((msg.lParam >> 16) & 0xFFFF).value
+            
+            rect = wintypes.RECT()
+            ctypes.windll.user32.GetWindowRect(int(self.winId()), ctypes.byref(rect))
+            
+            # Use device pixels for border
+            try:
+                dpi = ctypes.windll.user32.GetDpiForWindow(int(self.winId()))
+                scale = dpi / 96.0
+            except Exception:
+                scale = 1.0
+            
+            b = max(4, int(8 * scale))
+            
+            # Clamp to window bounds first
+            if (x < rect.left or x > rect.right or y < rect.top or y > rect.bottom):
+                return False, 0
+            
+            dist_left   = x - rect.left
+            dist_right  = rect.right  - x
+            dist_top    = y - rect.top
+            dist_bottom = rect.bottom - y
+            
+            if not self.isMaximized():
+                on_left   = dist_left   <= b
+                on_right  = dist_right  <= b
+                on_top    = dist_top    <= b
+                on_bottom = dist_bottom <= b
                 
-            if msg.message == WM_NCHITTEST:
-                # Handle hit testing for custom title bar and resize borders
-                def LOWORD(l): return l & 0xFFFF
-                def HIWORD(l): return (l >> 16) & 0xFFFF
-                
-                x = LOWORD(msg.lParam)
-                y = HIWORD(msg.lParam)
-                
-                # Convert screen coordinates to window coordinates
-                pos = self.mapFromGlobal(QPoint(x, y))
-                
-                # Check for resize borders (8px)
-                edges = self._get_edge(pos)
-                
-                HTLEFT        = 10
-                HTRIGHT       = 11
-                HTTOP         = 12
                 HTTOPLEFT     = 13
                 HTTOPRIGHT    = 14
-                HTBOTTOM      = 15
                 HTBOTTOMLEFT  = 16
                 HTBOTTOMRIGHT = 17
-                HTCAPTION     = 2
-                HTCLIENT      = 1
+                HTTOP         = 12
+                HTBOTTOM      = 15
+                HTLEFT        = 10
+                HTRIGHT       = 11
                 
-                if Qt.Edge.LeftEdge in edges and Qt.Edge.TopEdge in edges: return True, HTTOPLEFT
-                if Qt.Edge.RightEdge in edges and Qt.Edge.TopEdge in edges: return True, HTTOPRIGHT
-                if Qt.Edge.LeftEdge in edges and Qt.Edge.BottomEdge in edges: return True, HTBOTTOMLEFT
-                if Qt.Edge.RightEdge in edges and Qt.Edge.BottomEdge in edges: return True, HTBOTTOMRIGHT
-                if Qt.Edge.LeftEdge in edges: return True, HTLEFT
-                if Qt.Edge.RightEdge in edges: return True, HTRIGHT
-                if Qt.Edge.TopEdge in edges: return True, HTTOP
-                if Qt.Edge.BottomEdge in edges: return True, HTBOTTOM
+                if on_top and on_left: return True, HTTOPLEFT
+                if on_top and on_right: return True, HTTOPRIGHT
+                if on_bottom and on_left: return True, HTBOTTOMLEFT
+                if on_bottom and on_right: return True, HTBOTTOMRIGHT
+                if on_top: return True, HTTOP
+                if on_bottom: return True, HTBOTTOM
+                if on_left: return True, HTLEFT
+                if on_right: return True, HTRIGHT
+            
+            # Title bar area hit testing
+            title_height = int(40 * scale)
+            if dist_top <= title_height:
+                drag_rect = self._get_drag_rect()
+                if drag_rect:
+                    left_x, right_x, top_y, bot_y = drag_rect
+                    if left_x <= x <= right_x and top_y <= y <= bot_y:
+                        return True, 2 # HTCAPTION
+                else:
+                    # Fallback
+                    if (x - rect.left) < (rect.right - rect.left) * 0.4:
+                        return True, 2 # HTCAPTION
                 
-                # Check if mouse is in title bar area (40px height)
-                if pos.y() < 40:
-                    # Check if over a button or other interactive widget in title bar
-                    child = self.title_bar.childAt(pos)
-                    if not child or child == self.title_bar:
-                        return True, HTCAPTION
-                
-                return True, HTCLIENT
-                
+                return True, 1 # HTCLIENT
+            
+            return True, 1 # HTCLIENT
+        
         return super().nativeEvent(eventType, message)
