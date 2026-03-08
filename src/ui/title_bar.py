@@ -70,14 +70,11 @@ class WingosyTitleBar(QWidget):
         self.lib_btn = self._create_nav_btn("📚 Library", 0)
         self.emu_btn = self._create_nav_btn("🎮 Emulators", 1)
         self.log_btn = self._create_nav_btn("📋 Logs", 2)
+        self.settings_btn = self._create_nav_btn("⚙ Settings", 3)
         
         self.layout.addWidget(self.lib_btn)
         self.layout.addWidget(self.emu_btn)
         self.layout.addWidget(self.log_btn)
-
-        self.settings_btn = QPushButton("⚙ Settings")
-        self.settings_btn.setStyleSheet(self._nav_btn_style())
-        self.settings_btn.clicked.connect(self.settings_requested.emit)
         self.layout.addWidget(self.settings_btn)
 
         # Separator

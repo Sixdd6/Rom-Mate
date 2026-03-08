@@ -16,9 +16,10 @@ from PySide6.QtCore import Qt, QSettings, Slot, Signal, QThread, QTimer, QEvent,
 from src.ui.threads import (ImageFetcher, BiosDownloader, DolphinDownloader, 
                             DirectDownloader, GithubDownloader, ConflictResolveThread)
 from src.ui.widgets import get_resource_path, DownloadQueueWidget, format_speed
-from src.ui.dialogs import SetupDialog, SettingsDialog, WelcomeDialog, ConflictDialog
+from src.ui.dialogs import SetupDialog, WelcomeDialog, ConflictDialog
 from src.ui.tabs.library import LibraryTab
 from src.ui.tabs.emulators import EmulatorsTab
+from src.ui.tabs.settings import SettingsTab
 from src.utils import zip_path
 from src.platforms import RETROARCH_PLATFORMS, platform_matches
 from src import emulators
@@ -130,7 +131,6 @@ class WingosyMainWindow(QMainWindow):
         # Custom Title Bar
         self.title_bar = WingosyTitleBar(self)
         self.title_bar.tab_changed.connect(self._on_tab_changed)
-        self.title_bar.settings_requested.connect(self.open_settings)
         main_layout.addWidget(self.title_bar)
         
         # Update connection status
@@ -151,16 +151,49 @@ class WingosyMainWindow(QMainWindow):
 
         # Logs & Downloads Tab
         self.info_tabs = QTabWidget()
-        self.info_tabs.setStyleSheet("QTabWidget::pane { border: none; }")
+        self.info_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background: #1a1a1a;
+            }
+            QTabWidget > QTabBar {
+                background: #1a1a1a;
+                border-bottom: 1px solid #2d2d2d;
+            }
+            QTabBar::tab {
+                background: transparent;
+                color: #aaaaaa;
+                font-size: 11px;
+                padding: 8px 20px;
+                border: none;
+                border-bottom: 2px solid transparent;
+                min-width: 80px;
+            }
+            QTabBar::tab:selected {
+                color: #ffffff;
+                border-bottom: 2px solid #0d6efd;
+                background: transparent;
+            }
+            QTabBar::tab:hover {
+                color: #dddddd;
+                background: rgba(255,255,255,0.04);
+            }
+            QTabBar::scroller {
+                width: 0px;
+            }
+        """)
         self.download_queue = DownloadQueueWidget()
-        self.info_tabs.addTab(self.download_queue, "Downloads")        
+        self.info_tabs.addTab(self.download_queue, "📥 Downloads")        
 
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setStyleSheet("background: #121212; color: #bbdefb; font-family: Consolas; border: none;")
-        self.info_tabs.addTab(self.log_area, "Logs")
+        self.info_tabs.addTab(self.log_area, "📋 Logs")
 
         self.tabs.addTab(self.info_tabs, "Logs")
+        
+        self.settings_tab = SettingsTab(self)
+        self.tabs.addTab(self.settings_tab, "Settings")
         
         main_layout.addWidget(self.tabs)
 
@@ -286,7 +319,7 @@ class WingosyMainWindow(QMainWindow):
         if res == "REAUTH_REQUIRED":
             QMessageBox.warning(self, "Session Expired", 
                 "Your session has expired. Please log in again.")
-            self.open_settings()
+            self._on_tab_changed(3) # Settings
             return
         
         if res is None:
@@ -582,7 +615,7 @@ class WingosyMainWindow(QMainWindow):
         self.tray_icon.showMessage(title, msg, QSystemTrayIcon.Information, 3000)
 
     def open_settings(self):
-        SettingsDialog(self.config, self, self).exec()
+        self._on_tab_changed(3)
 
     def ensure_watcher_running(self):
         if not self.watcher:
