@@ -982,7 +982,29 @@ class GameDetailDialog(QDialog):
         self._reconnect_active_download()
 
     def download_rom(self, file_obj):
+        if not file_obj: return
+        
+        # Determine target path
+        if self._is_windows:
+            target_dir = Path(self.config.get("windows_games_dir"))
+            target_path = target_dir / file_obj['file_name']
+        else:
+            target_dir = Path(self.config.get("base_rom_path")) / self.game.get('platform_slug')
+            target_path = target_dir / file_obj['file_name']
+            
+        os.makedirs(target_dir, exist_ok=True)
+        
+        self.dl_thread = RomDownloader(self.client, self.game['id'], file_obj['file_name'], str(target_path))
+        download_registry.register_download(self.game['id'], self.game['name'], self.dl_thread)
+        
+        self.dl_thread.progress.connect(lambda d, t, s: download_registry.update_progress(self.game['id'], d, t, s))
+        self.dl_thread.finished.connect(lambda ok, p: self._on_download_finished(ok, p))
+        
+        self.main_window.download_queue.add_download(self.game['name'], self.dl_thread, "download", self.game['id'])
+        self.dl_thread.start()
+        self._reconnect_active_download()
 
+    def _do_blocking_pull(self, save_info, is_ra):
         watcher = self.main_window.watcher
         rom_id = self.game['id']
         title = self.game['name']
