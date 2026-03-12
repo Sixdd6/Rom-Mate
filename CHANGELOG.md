@@ -1,9 +1,16 @@
 # Changelog
 
-## v0.6.0
+## v0.6.0 (2026-03-12)
+### Fixed
+- Cloud save missing detection (upload when no wingosy slot exists)
+- Windows settings auto-detect NameError (typo in loop variable)
+- Exe picker dialog not launching game after selection (broken parent-walk replaced with signal)
+- Game launches before conflict dialog resolved (blocking QEventLoop)
+- Emulator track_session re-pulling saves after launch (skip_pull=True)
+
 ### Added
+- PCGamingWiki integration in Windows game settings for automatic save directory detection
 - Windows native game support (.zip/.7z/.iso download, extract, launch)
-- PCGamingWiki save location suggestions
 - Per-game Windows settings (default exe, save directory)
 - Custom emulator editor UI with full schema support
 - Per-platform emulator assignment
@@ -14,15 +21,11 @@
 - Dynamic emulator schema managed via emulators.json
 - Redesigned game detail focus view
 - Watcher error boundaries and configurable log levels
+- DummyRomMClient stub methods (list_all_saves, list_all_states, delete_save, delete_state)
 
 ### Security
 - Migrated auth token storage to system keyring (Windows Credential Picker)
 - Automatic migration of existing tokens from plaintext config
-
-### Fixed
-- Library reload behavior on emulator path changes
-- Platform filter reset regression
-- Standardized RomMClient token lifecycle management
 
 ## v0.5.7
 ### Added

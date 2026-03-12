@@ -21,6 +21,18 @@
 - Parallel library loading for large collections
 - Configurable sync interval and log level
 
+## What's New in v0.6.0 (2026-03-12)
+### Fixed
+- **Cloud save missing detection**: Wingosy now uploads even when no wingosy slot exists on RomM
+- **Windows settings auto-detect NameError**: Fixed crash caused by loop variable typo
+- **Exe picker dialog**: Fixed broken parent-walk logic that prevented game launch after selection
+- **Conflict blocking**: Game launch now correctly waits for conflict dialog resolution
+- **Double pull prevention**: Fixed emulator track_session re-pulling saves after pre-launch sync
+
+### Added
+- **PCGamingWiki integration**: Automatic save directory discovery for Windows games
+- **API Parity**: Full test suite coverage for DummyRomMClient stub methods
+
 ## Supported Emulators
 
 | Emulator | Platforms |
