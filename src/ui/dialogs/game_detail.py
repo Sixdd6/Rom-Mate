@@ -267,9 +267,15 @@ class GameDetailPanel(QWidget):
 
         # After building the UI, check registry
         self._reconnect_active_download()
+        self.destroyed.connect(self._cleanup)
             
         self._start_image_fetch()
         self._start_desc_fetch()
+
+    def _cleanup(self):
+        rom_id = str(self.game["id"])
+        if hasattr(self, '_progress_listener'):
+            download_registry.remove_listener(rom_id, self._progress_listener)
 
     def _build_header(self, game_name):
         header = QWidget()
@@ -404,12 +410,19 @@ class GameDetailPanel(QWidget):
             self._sz_fetcher.start()
         else:
             download_registry.unregister(self.game['id'])
+            # Direct file download complete — mark local exists
+            self.game['_local_exists'] = True
             self._update_button_states()
+            self.main_window.library_tab.apply_filters()
 
     def _on_extraction_finished(self, path):
         download_registry.unregister(self.game['id'])
+        # Mark local exists directly on the game dict so _update_button_states works
+        self.game['_local_exists'] = True
         self._update_button_states()
-        self.main_window.fetch_library_and_populate()
+        # Refresh library in background to update card in grid
+        # Use apply_filters instead of full re-fetch to avoid closing the detail panel
+        self.main_window.library_tab.apply_filters()
 
     def cancel_dl(self):
         rom_id = str(self.game["id"])
@@ -427,6 +440,7 @@ class GameDetailPanel(QWidget):
             )
             if reply == QMessageBox.Cancel: return
             
+            # 1. Request interruption
             entry["thread"].cancel()
             if reply == QMessageBox.Discard:
                 def on_cancelled(path):
@@ -442,17 +456,29 @@ class GameDetailPanel(QWidget):
             )
             if reply == QMessageBox.Cancel: return
             
+            # 1. Request interruption
             entry["thread"].cancel()
             if reply == QMessageBox.Discard:
                 def on_cancelled_dl():
                     p = getattr(entry["thread"], 'file_path', None)
                     if p and os.path.exists(p):
-                        try: os.remove(p)
-                        except: pass
+                        # Wait for thread to release file handle then delete
+                        for _ in range(10):  # retry up to 1 second
+                            try:
+                                os.remove(p)
+                                break
+                            except PermissionError:
+                                import time
+                                time.sleep(0.1)
+                            except Exception:
+                                break
+                    self._update_button_states()
                 entry["thread"].cancelled.connect(on_cancelled_dl)
 
+        self.game['_local_exists'] = False # Reset state immediately
+        # 2. Update status in registry (thread will handle unregistering)
         download_registry.update_status(rom_id, "cancelled")
-        QTimer.singleShot(1000, lambda: download_registry.unregister(rom_id))
+        
         self.can_btn.hide()
         self.pbar.hide()
         self._update_button_states()
@@ -464,7 +490,10 @@ class GameDetailPanel(QWidget):
         self._local_rom_path = self._get_local_rom_path()
         p = self._local_rom_path
         
-        if self._is_windows and p and p.is_dir():
+        # If explicitly marked as not installed (e.g. after cancel), trust that
+        if self.game.get('_local_exists') is False:
+            exists = False
+        elif self._is_windows and p and p.is_dir():
             exists = any(p.rglob("*.exe"))
         else:
             exists = p and p.exists() if p else False
@@ -494,14 +523,24 @@ class GameDetailPanel(QWidget):
         url = self.client.get_cover_url(self.game)
         if url:
             self.it = ImageFetcher(self.game['id'], url)
-            self.it.finished.connect(lambda g, p: self.img_label.setPixmap(p.scaled(280, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            def _safe_set_pixmap(g, p):
+                try:
+                    self.img_label.setPixmap(p.scaled(280, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                except RuntimeError:
+                    pass  # Panel was closed before image loaded
+            self.it.finished.connect(_safe_set_pixmap)
             self.it.finished.connect(lambda t=self.it: self.main_window.active_threads.remove(t) if t in self.main_window.active_threads else None)
             self.main_window.active_threads.append(self.it)
             self.it.start()
             
     def _start_desc_fetch(self):
         self.dt = GameDescriptionFetcher(self.client, self.game['id'])
-        self.dt.finished.connect(self.desc_label.setText)
+        def _safe_set_text(text):
+            try:
+                self.desc_label.setText(text)
+            except RuntimeError:
+                pass
+        self.dt.finished.connect(_safe_set_text)
         self.dt.finished.connect(lambda t=self.dt: self.main_window.active_threads.remove(t) if t in self.main_window.active_threads else None)
         self.main_window.active_threads.append(self.dt)
         self.dt.start()
@@ -526,6 +565,12 @@ class GameDetailPanel(QWidget):
                 QMessageBox.critical(self, "Error — Wingosy", str(e))
                 
     def _on_download_clicked(self):
+        # Prevent duplicate downloads
+        rom_id = str(self.game["id"])
+        existing = download_registry.get(rom_id)
+        if existing and existing.get("status") in ("downloading", "extracting"):
+            return  # Already in progress, ignore click
+
         windows_dir = self.config.get("windows_games_dir", "")
         if self._is_windows and not windows_dir:
             directory = QFileDialog.getExistingDirectory(self, "Select Windows Games Folder")
@@ -577,7 +622,8 @@ class GameDetailPanel(QWidget):
         if self._is_windows:
             target_dir = target_dir / Path(path).stem
 
-        self.extract_thread = ExtractionThread(path, str(target_dir))
+        rom_id = str(self.game['id'])
+        self.extract_thread = ExtractionThread(path, str(target_dir), rom_id=rom_id)
         download_registry.register_extraction(self.game['id'], self.game['name'], self.extract_thread)
 
         self.extract_thread.progress.connect(lambda d, t: download_registry.update_progress(self.game['id'], d, t))

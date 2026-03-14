@@ -12,6 +12,7 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QPixmap, QImage
 
 from src.sevenzip import get_7zip_exe
+from src import download_registry
 
 # Try to import py7zr for extraction fallback
 try:
@@ -120,14 +121,16 @@ class ExtractionThread(QThread):
     error     = Signal(str)
     cancelled = Signal(str)      # target_dir
 
-    def __init__(self, archive_path, target_dir):
+    def __init__(self, archive_path, target_dir, rom_id=None):
         super().__init__()
         self.archive_path = Path(archive_path)
         self.target_dir = Path(target_dir)
+        self.rom_id = rom_id
         self._cancelled = False
 
     def cancel(self):
         self._cancelled = True
+        self.requestInterruption()
 
     def run(self):
         try:
@@ -157,17 +160,26 @@ class ExtractionThread(QThread):
             self.error.emit(str(e))
 
     def _extract_zip(self) -> bool:
-        with zipfile.ZipFile(self.archive_path, 'r') as zf:
-            members = zf.namelist()
-            total = len(members)
-            os.makedirs(self.target_dir, exist_ok=True)
-            for i, member in enumerate(members):
-                if self._cancelled:
-                    self.cancelled.emit(str(self.target_dir))
-                    return False
-                zf.extract(member, str(self.target_dir))
-                self.progress.emit(i + 1, total)
-        return True
+        try:
+            with zipfile.ZipFile(self.archive_path, 'r') as zf:
+                members = zf.namelist()
+                total = len(members)
+                os.makedirs(self.target_dir, exist_ok=True)
+                for i, member in enumerate(members):
+                    if self._cancelled or self.isInterruptionRequested():
+                        zf.close() # Ensure closed before cleanup
+                        if self.target_dir.exists():
+                            shutil.rmtree(self.target_dir, ignore_errors=True)
+                        if self.rom_id:
+                            download_registry.unregister(self.rom_id)
+                        self.cancelled.emit(str(self.target_dir))
+                        return False
+                    zf.extract(member, str(self.target_dir))
+                    self.progress.emit(i + 1, total)
+            return True
+        except Exception as e:
+            if self._cancelled or self.isInterruptionRequested(): return False
+            raise e
 
     def _extract_7z(self, exe_path) -> bool:
         self.target_dir.mkdir(parents=True, exist_ok=True)
@@ -200,9 +212,13 @@ class ExtractionThread(QThread):
         
         if proc.stdout:
             for line in proc.stdout:
-                if self._cancelled:
+                if self._cancelled or self.isInterruptionRequested():
                     proc.terminate()
                     proc.wait()
+                    if self.target_dir.exists():
+                        shutil.rmtree(self.target_dir, ignore_errors=True)
+                    if self.rom_id:
+                        download_registry.unregister(self.rom_id)
                     self.cancelled.emit(str(self.target_dir))
                     return False
                 
@@ -215,7 +231,11 @@ class ExtractionThread(QThread):
         
         proc.wait()
         
-        if self._cancelled:
+        if self._cancelled or self.isInterruptionRequested():
+            if self.target_dir.exists():
+                shutil.rmtree(self.target_dir, ignore_errors=True)
+            if self.rom_id:
+                download_registry.unregister(self.rom_id)
             self.cancelled.emit(str(self.target_dir))
             return False
         
@@ -231,13 +251,26 @@ class ExtractionThread(QThread):
         
         logging.warning("[Extract] Using py7zr fallback — this may be slow")
         self.progress.emit(0, 0)
-        with py7zr.SevenZipFile(self.archive_path, 'r') as z:
-            z.extractall(str(self.target_dir))
-        if self._cancelled:
-            self.cancelled.emit(str(self.target_dir))
-            return False
-        self.progress.emit(1, 1)
-        return True
+        try:
+            with py7zr.SevenZipFile(self.archive_path, 'r') as z:
+                z.extractall(str(self.target_dir))
+            if self._cancelled or self.isInterruptionRequested():
+                if self.target_dir.exists():
+                    shutil.rmtree(self.target_dir, ignore_errors=True)
+                if self.rom_id:
+                    download_registry.unregister(self.rom_id)
+                self.cancelled.emit(str(self.target_dir))
+                return False
+            self.progress.emit(1, 1)
+            return True
+        except Exception as e:
+            if self._cancelled or self.isInterruptionRequested():
+                if self.target_dir.exists():
+                    shutil.rmtree(self.target_dir, ignore_errors=True)
+                if self.rom_id:
+                    download_registry.unregister(self.rom_id)
+                return False
+            raise e
 
     def _strip_root(self):
         try:
@@ -267,6 +300,7 @@ class BaseDownloader(QThread):
 
     def cancel(self):
         self._cancelled = True
+        self.requestInterruption()
 
     def perform_download(self, url, target_dir):
         try:
@@ -398,13 +432,14 @@ class RomDownloader(QThread):
 
     def cancel(self):
         self._cancelled = True
+        self.requestInterruption()
 
     def run(self):
         self._last_time = time.time()
         self._last_bytes = 0
         
         def cb(d, t, s):
-            if not self._cancelled:
+            if not self._cancelled and not self.isInterruptionRequested():
                 now = time.time()
                 elapsed = now - self._last_time
                 if elapsed >= 0.5:
@@ -416,7 +451,9 @@ class RomDownloader(QThread):
                     self.progress.emit(float(d), float(t), 0.0)
         
         success = self.client.download_rom(self.rom_id, self.file_name, self.target_path, cb, thread=self)
-        if self._cancelled:
+        if self._cancelled or self.isInterruptionRequested():
+            if self.rom_id:
+                download_registry.unregister(self.rom_id)
             self.cancelled.emit()
         else:
             self.finished.emit(success, self.target_path)
@@ -436,6 +473,7 @@ class BiosDownloader(QThread):
 
     def cancel(self):
         self._cancelled = True
+        self.requestInterruption()
 
     def run(self):
         self._last_time = time.time()

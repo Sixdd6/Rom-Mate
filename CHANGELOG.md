@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.6.3 (Planned)
+- Auto-extraction of BIOS files from multi-file archives
+- BIOS download progress bars in manager UI
+- Dedicated BIOS management tab (independent of emulator list)
+
+## v0.6.2 (2026-03-14)
+### Added
+- Overhauled BIOS/Firmware Manager:
+    - Dedicated RomM `/api/firmware` support with platform-scraping fallback
+    - Group-by-platform UI layout with "Download All" support
+    - Smart BIOS destinations (auto-resolves `%APPDATA%`, `Documents`, and emulator paths)
+    - Emulator-specific filtering (only shows BIOS files relevant to the active emulator)
+    - PS3 Firmware (`PS3UPDAT.PUP`) installation via RPCS3 `--installfw` command
+- Mid-session save sync improvements:
+    - Opt-in via settings (`mid_session_sync_enabled`, default False)
+    - Hash-based change detection (only uploads if save changed since session start)
+
+### Fixed
+- BIOS Manager false "No BIOS files found" by restoring platform-based fetching
+- BIOS Manager noise reduction: added filename blocklist (python, java, etc.) and PlayStation pattern cross-checks
+- Redundant mid-session uploads for frequent autosave games (Switch Odyssey fix)
+
 ## v0.6.0 (2026-03-12)
 ### Fixed
 - Cloud save missing detection (upload when no wingosy slot exists)

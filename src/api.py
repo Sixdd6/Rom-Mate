@@ -512,18 +512,14 @@ class RomMClient:
             return False, str(e)
 
     def get_firmware(self):
+        """
+        Fetch BIOS/firmware files by iterating platforms and collecting their firmware objects.
+        """
         try:
             url = f"{self.host}/api/platforms"
-            try:
-                r = requests.get(url, headers=self.get_auth_headers(), 
-                                 timeout=REQUEST_TIMEOUT, verify=CERTIFI_PATH)
-            except (requests.exceptions.ConnectTimeout,
-                    requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout,
-                    requests.exceptions.RequestException) as e:
-                print(f"[API] Network error in get_firmware: {e}")
-                return []
-
+            r = requests.get(url, headers=self.get_auth_headers(), 
+                             timeout=REQUEST_TIMEOUT, verify=CERTIFI_PATH)
+            
             if r.status_code == 200:
                 platforms = r.json()
                 firmware_list = []
@@ -539,6 +535,12 @@ class RomMClient:
         except Exception as e:
             print(f"[API] Error getting firmware: {e}")
             return []
+
+    def get_bios_files(self):
+        """
+        Alias for get_firmware using the correct RomM dedicated endpoint.
+        """
+        return self.get_firmware()
 
     def download_firmware(self, fw_item, target_path, progress_cb=None, thread=None):
         try:

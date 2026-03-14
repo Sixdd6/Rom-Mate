@@ -271,6 +271,12 @@ class SettingsTab(QWidget):
         self.ap_check.toggled.connect(lambda checked: self.config.set("auto_pull_saves", checked))
         self._apply_widget_style(self.ap_check)
         layout.addWidget(self._make_row("Cloud Sync", self.ap_check))
+
+        self.mid_sync_check = QCheckBox("Sync changes during session")
+        self.mid_sync_check.setChecked(self.config.get("mid_session_sync_enabled", False))
+        self.mid_sync_check.toggled.connect(lambda checked: self.config.set("mid_session_sync_enabled", checked))
+        self._apply_widget_style(self.mid_sync_check)
+        layout.addWidget(self._make_row("Mid-Session Sync", self.mid_sync_check))
         
         self.ra_combo = QComboBox()
         self.ra_combo.addItems(["Both", "SRM only", "States only"])
@@ -442,7 +448,22 @@ class SettingsTab(QWidget):
     def on_self_update_finished(self, success, msg):
         if success:
             QMessageBox.information(self, "Done", "Update installed. Restarting...")
-            subprocess.Popen(['cmd.exe', '/c', f'timeout /t 2 >NUL & start "" "{sys.executable}"'], creationflags=subprocess.CREATE_NO_WINDOW)
+            exe = str(Path(sys.executable).resolve())
+            # Write a tiny batch file to restart — more reliable than
+            # inline cmd string which breaks with certain path characters
+            bat = Path(sys.executable).parent / "_wingosy_restart.bat"
+            bat.write_text(
+                f'@echo off\r\n'
+                f'timeout /t 2 >NUL\r\n'
+                f'start "" "{exe}"\r\n'
+                f'del "%~f0"\r\n',  # self-delete the batch file
+                encoding='utf-8'
+            )
+            subprocess.Popen(
+                ['cmd.exe', '/c', str(bat)],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                close_fds=True
+            )
             sys.exit(0)
         else:
             QMessageBox.critical(self, "Failed", msg)

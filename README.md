@@ -21,6 +21,16 @@
 - Parallel library loading for large collections
 - Configurable sync interval and log level
 
+## What's New in v0.6.2 (2026-03-14)
+### Added
+- **Overhauled BIOS/Firmware Manager**:
+    - Automatic grouping and filtering of BIOS files per emulator
+    - Smart destination resolution (places files in correct system/keys folders automatically)
+    - PS3 Firmware installation support via RPCS3 integration
+- **Optimized Save Sync**:
+    - Mid-session sync is now opt-in to save bandwidth and disk IO
+    - Hash-based change detection prevents redundant uploads
+
 ## What's New in v0.6.0 (2026-03-12)
 ### Fixed
 - **Cloud save missing detection**: Wingosy now uploads even when no wingosy slot exists on RomM

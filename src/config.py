@@ -56,6 +56,7 @@ class ConfigManager:
         "windows_conflict_behavior": "ask",
         "conflict_behavior": "ask",
         "sync_interval_seconds": 120,
+        "mid_session_sync_enabled": False,
         "max_save_versions": 5,
         "pcgamingwiki_enabled": True,
         "controller_type": "xinput",

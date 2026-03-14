@@ -430,39 +430,38 @@ class WingosyWatcher(QThread):
             self.session_errors[rom_id_str] = self.session_errors.get(rom_id_str, 0) + 1
 
     def _do_mid_session_sync(self, data):
+        if not self.config.get("mid_session_sync_enabled", False):
+            return
+        
         strategy, rom = data['strategy'], data['game_data']
         rom_id = data['rom_id']
         title = data['title']
         
         new_h = self._get_current_hash(strategy, rom)
+        init_h = data.get('initial_hash')
+        
+        # Only sync mid-session if save actually changed since session started
+        if new_h is None or new_h == init_h:
+            return
+        
+        # Also check we haven't already synced this exact hash mid-session
+        if new_h == data.get('last_mid_sync_hash'):
+            return
+        
+        logging.info(f"🔄 Mid-session changes detected for {title}. Syncing...")
+        # Mid-session we still do async via thread — upload happens entirely in the thread
+        thread = PostSessionSyncThread(self, data, new_h=new_h)
+        thread.log.connect(self.log_signal)
+        thread.notify.connect(self.notify_signal)
+        # For mid-session, we don't necessarily update the mtime cache the same way as exit, 
+        # but let's keep it consistent for tracking
         new_m = self._get_max_mtime(strategy, rom)
+        thread.done.connect(lambda name, ok: self._on_sync_thread_done(str(rom_id), new_m, ok))
         
-        cache_entry = self.sync_cache.get(str(rom_id), {})
-        cached_mtime = cache_entry.get("save_mtime") or cache_entry.get("save_updated_at")
-        if isinstance(cached_mtime, str):
-            try:
-                cached_mtime = datetime.fromisoformat(cached_mtime).timestamp()
-            except Exception:
-                cached_mtime = None
-        
-        should_sync = False
-        if cached_mtime is None:
-            should_sync = True
-        else:
-            should_sync = new_m > cached_mtime
-
-        if should_sync or (new_h and new_h != data.get('last_mid_sync_hash', data.get('initial_hash'))):
-            logging.info(f"🔄 Mid-session changes detected for {title}. Syncing...")
-            # Mid-session we still do async via thread — upload happens entirely in the thread
-            thread = PostSessionSyncThread(self, data, new_m=new_m, new_h=new_h)
-            thread.log.connect(self.log_signal)
-            thread.notify.connect(self.notify_signal)
-            thread.done.connect(lambda name, ok: self._on_sync_thread_done(str(rom_id), new_m, ok))
-            
-            self._sync_threads.append(thread)
-            thread.finished.connect(lambda t=thread: self._sync_threads.remove(t) if t in self._sync_threads else None)
-            thread.start()
-            data['last_mid_sync_hash'] = new_h
+        self._sync_threads.append(thread)
+        thread.finished.connect(lambda t=thread: self._sync_threads.remove(t) if t in self._sync_threads else None)
+        thread.start()
+        data['last_mid_sync_hash'] = new_h
 
     def _update_playtime(self, data):
         try:

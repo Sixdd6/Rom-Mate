@@ -201,6 +201,7 @@ class DownloadRow(QWidget):
             )
             if reply == QMessageBox.Cancel: return
             
+            # 1. Request interruption
             self.thread.cancel()
             if reply == QMessageBox.Discard:
                 def on_cancelled(path):
@@ -216,21 +217,44 @@ class DownloadRow(QWidget):
             )
             if reply == QMessageBox.Cancel: return
             
+            # 1. Request interruption
             self.thread.cancel()
             if reply == QMessageBox.Discard:
                 def on_cancelled_dl():
                     p = getattr(self.thread, 'file_path', None)
                     if p and os.path.exists(p):
-                        try: os.remove(p)
-                        except: pass
+                        for _ in range(10):  # retry up to 1 second
+                            try:
+                                os.remove(p)
+                                break
+                            except PermissionError:
+                                import time
+                                time.sleep(0.1)
+                            except Exception:
+                                break
+                    # Notify library to refresh button states
+                    try:
+                        from PySide6.QtWidgets import QApplication
+                        app = QApplication.instance()
+                        if app and hasattr(app, 'main_window'):
+                            mw = app.main_window
+                            # Reset _local_exists on matching game
+                            for game in getattr(mw, 'all_games', []):
+                                if str(game.get('id')) == str(self.rom_id):
+                                    game['_local_exists'] = False
+                                    break
+                            mw.library_tab.apply_filters()
+                    except Exception:
+                        pass
                 self.thread.cancelled.connect(on_cancelled_dl)
+
+        # 2. Update status in registry (thread will handle unregistering)
+        download_registry.update_status(self.rom_id, "cancelled")
 
         self.status_badge.setText("Cancelled")
         self._update_badge_style("cancelled")
         self.cancel_btn.hide()
         self.speed_label.setText("")
-        download_registry.update_status(self.rom_id, "cancelled")
-        QTimer.singleShot(2000, lambda: download_registry.unregister(self.rom_id))
 
     def closeEvent(self, event):
         download_registry.remove_listener(self.rom_id, self.on_registry_update)

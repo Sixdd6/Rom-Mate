@@ -9,14 +9,14 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QTabWidget, QTextEdit, 
                              QSystemTrayIcon, QMenu, QApplication, QFileDialog, 
                              QMessageBox, QDialog, QLineEdit, QDialogButtonBox, 
-                             QScrollArea)
+                             QScrollArea, QFrame)
 from PySide6.QtGui import QIcon, QPixmap, QKeySequence, QShortcut
 from PySide6.QtCore import Qt, QSettings, Slot, Signal, QThread, QTimer, QEvent, QPoint
 
 from src.ui.threads import (ImageFetcher, BiosDownloader, DolphinDownloader, 
                             DirectDownloader, GithubDownloader, ConflictResolveThread,
                             LocalDiscoveryWorker)
-from src.ui.widgets import get_resource_path, DownloadQueueWidget, format_speed
+from src.ui.widgets import get_resource_path, DownloadQueueWidget, format_speed, format_size
 from src.ui.dialogs import SetupDialog, WelcomeDialog, ConflictDialog
 from src.ui.dialogs.emulator_editor import AssetPickerDialog
 from src.emulator_sources import EMULATOR_SOURCES
@@ -197,6 +197,8 @@ class WingosyMainWindow(QMainWindow):
     def _on_tab_changed(self, index):
         self.tabs.setCurrentIndex(index)
         self.title_bar.set_active_tab(index)
+        if index == 0:  # Library
+            self.library_tab.refresh_card_states()
 
     def eventFilter(self, obj, event):
         return super().eventFilter(obj, event)
@@ -276,7 +278,6 @@ class WingosyMainWindow(QMainWindow):
         force_refresh=True: wipe cache display, fetch fresh from server.
         """
         self.library_tab.refresh_btn.setEnabled(False)
-        self.library_tab.retry_btn.setVisible(False)
         self._library_fetch_done = False
         
         if not force_refresh:
@@ -428,21 +429,29 @@ class WingosyMainWindow(QMainWindow):
         emu_data = next((e for e in all_emus if e["name"] == emu_name), None)
         if not emu_data: return
         
-        slugs = emu_data.get("platform_slugs", [])
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"{emu_name} BIOS / Firmware")
-        dialog.resize(600, 500)
-        layout = QVBoxLayout(dialog)
+        emu_id = emu_data.get("id", "").lower()
         
-        search_layout = QHBoxLayout()
-        search_layout.addWidget(QLabel("Search Library:"))
-        # Use first slug as default search, or 'bios'
-        default_term = slugs[0] if slugs and slugs[0] != "multi" else "bios"
-        self.fw_search_input = QLineEdit(default_term)
-        search_layout.addWidget(self.fw_search_input)
-        search_btn = QPushButton("Search")
-        search_layout.addWidget(search_btn)
-        layout.addLayout(search_layout)
+        EMULATOR_BIOS_PLATFORMS = {
+            "eden":       ["switch", "nintendo-switch"],
+            "rpcs3":      ["ps3", "playstation-3", "playstation3"],
+            "pcsx2":      ["ps2", "playstation-2", "playstation2"],
+            "duckstation":["ps", "psx", "playstation", "playstation-1"],
+            "retroarch":  None,  # None = show ALL platforms (RetroArch supports everything)
+            "dolphin":    ["gc", "ngc", "gamecube", "nintendo-gamecube", "wii", "nintendo-wii"],
+            "cemu":       ["wiiu", "wii-u", "nintendo-wii-u"],
+            "azahar":     ["n3ds", "3ds", "nintendo-3ds", "new-nintendo-3ds"],
+            "melonds":    ["nds", "nintendo-ds"],
+            "xemu":       ["xbox"],
+            "xenia":      [],  # Xbox 360 has no BIOS files needed
+            "xenia_canary": [],
+        }
+
+        allowed_platforms = EMULATOR_BIOS_PLATFORMS.get(emu_id, None)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"RomM BIOS Manager — {emu_name}")
+        dialog.resize(700, 600)
+        layout = QVBoxLayout(dialog)
         
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -452,54 +461,166 @@ class WingosyMainWindow(QMainWindow):
         scroll_area.setWidget(container)
         layout.addWidget(scroll_area)
 
-        def perform_search():
+        def refresh():
             for i in reversed(range(list_layout.count())):
                 item = list_layout.itemAt(i)
                 if item and item.widget():
                     item.widget().setParent(None)
             
-            term = self.fw_search_input.text().lower()
+            # Re-fetch from API
             firmwares = self.client.get_firmware()
-            matches = [f for f in firmwares if term in f.get('file_name', '').lower() or term in f.get('platform_name', '').lower() or term in f.get('platform_slug', '')]
             
-            for game in self.client.user_games:
-                if term in game.get('name', '').lower() or term in game.get('fs_name', '').lower():
-                    files = game.get('files', [])
-                    if files:
-                        matches.append({'id': game['id'], 'file_name': files[0].get('file_name'), 'platform_name': game.get('platform_display_name', 'Library'), 'is_rom': True})
-            
-            if not matches:
-                list_layout.addWidget(QLabel("No results found."))
+            # Filtering constants
+            NO_BIOS_PLATFORMS = {
+                "windows", "win", "pc", "pc-windows", "dos", "win95", "win98",
+                "xbox360", "xbla", "xbox-360",
+                "android", "ios", "mac", "linux"
+            }
+            GAME_ROM_EXTENSIONS = {
+                '.cia', '.nsp', '.xci',           # Switch/3DS installable games
+                '.z64', '.n64', '.v64',           # N64 ROMs  
+                '.sfc', '.smc', '.fig',           # SNES ROMs
+                '.nes', '.fds',                   # NES ROMs (fds is Famicom Disk, NOT a BIOS)
+                '.gba', '.gbc', '.gb',            # Game Boy ROMs
+                '.nds', '.3ds',                   # DS/3DS ROMs
+                '.gen', '.md', '.smd',            # Genesis ROMs
+                '.iso', '.chd', '.cso', '.pbp',   # Disc images that are games not BIOS
+                '.7z', '.rar',                    # Archives (BIOS files are rarely archived)
+            }
+            FILE_NAME_BLOCKLIST = ["python", "java", "readme", "license", "changelog", "install", "setup", "update"]
+
+            if allowed_platforms == []:
+                msg = QLabel(f"No BIOS files required for {emu_name}.")
+                msg.setAlignment(Qt.AlignCenter)
+                msg.setStyleSheet("color: #aaa; margin: 40px; font-size: 14px;")
+                list_layout.addWidget(msg)
                 return
-                
+
             platforms_map = {}
-            for fw in matches:
-                p = fw.get('platform_name', 'Other')
-                if p not in platforms_map: platforms_map[p] = []
-                platforms_map[p].append(fw)
+            # Debug tracking
+            stats = {
+                "total_firmware_items": len(firmwares),
+                "platforms_with_firmware": set(),
+                "skipped_no_bios_platform": 0,
+                "skipped_game_extension": 0,
+                "skipped_not_for_emu": 0,
+                "skipped_blocklist": 0,
+                "skipped_pattern_mismatch": 0
+            }
+
+            for fw in firmwares:
+                p_slug = str(fw.get('platform_slug', '')).lower()
+                p_name = fw.get('platform_name') or fw.get('platform_display_name') or 'Other'
+                stats["platforms_with_firmware"].add(p_slug)
                 
+                # Filter A: Exclude non-BIOS platforms
+                if p_slug in NO_BIOS_PLATFORMS:
+                    stats["skipped_no_bios_platform"] += 1
+                    continue
+
+                # Filter B: Emulator specific platform filtering
+                if allowed_platforms is not None and p_slug not in allowed_platforms:
+                    stats["skipped_not_for_emu"] += 1
+                    continue
+
+                f_name = fw.get('file_name', 'unknown')
+                f_name_lower = f_name.lower()
+                ext = Path(f_name).suffix.lower()
+                size = fw.get('file_size_bytes') or 0
+                
+                # Filter C: Filename blocklist
+                stem = Path(f_name).stem.lower()
+                if stem in FILE_NAME_BLOCKLIST:
+                    stats["skipped_blocklist"] += 1
+                    continue
+
+                # Filter D: Pattern mismatch (scph* belongs to PlayStation)
+                if f_name_lower.startswith("scph") and "playstation" not in p_slug and "ps" not in p_slug:
+                    stats["skipped_pattern_mismatch"] += 1
+                    continue
+
+                # Filter E: Exclude game ROMs by extension (with size caveat)
+                if ext in GAME_ROM_EXTENSIONS and size > 16 * 1024 * 1024:
+                    stats["skipped_game_extension"] += 1
+                    continue
+
+                if p_name not in platforms_map: platforms_map[p_name] = []
+                platforms_map[p_name].append(fw)
+
+            if not platforms_map:
+                debug_info = (
+                    f"DEBUG INFO:\n"
+                    f"- Total items from API: {stats['total_firmware_items']}\n"
+                    f"- Skipped (Non-BIOS platform): {stats['skipped_no_bios_platform']}\n"
+                    f"- Skipped (Not for this emulator): {stats['skipped_not_for_emu']}\n"
+                    f"- Skipped (Blocklist): {stats['skipped_blocklist']}\n"
+                    f"- Skipped (Pattern mismatch): {stats['skipped_pattern_mismatch']}\n"
+                    f"- Skipped (Game ROM >16MB): {stats['skipped_game_extension']}"
+                )
+                
+                msg = QLabel(f"No BIOS files found for this emulator on your RomM server.\n\n{debug_info}")
+                msg.setAlignment(Qt.AlignCenter)
+                msg.setWordWrap(True)
+                msg.setStyleSheet("color: #aaa; margin: 40px; font-size: 13px; line-height: 1.5;")
+                list_layout.addWidget(msg)
+                return
+
             for plat_name, files in platforms_map.items():
-                if len(files) > 1:
-                    group = QWidget()
-                    gl = QVBoxLayout(group)
-                    group.setStyleSheet("background: #333; border-radius: 5px; margin: 5px;")
-                    gl.addWidget(QLabel(f"<b>{plat_name} ({len(files)} files)</b>"))
-                    dl_set_btn = QPushButton("Download Full Set")
-                    dl_set_btn.clicked.connect(lambda checked, f_list=files: self.dl_fw_list(emu_name, f_list, dialog))
-                    gl.addWidget(dl_set_btn)
-                    list_layout.addWidget(group)
-                else:
-                    fw = files[0]
+                group = QWidget()
+                gl = QVBoxLayout(group)
+                group.setStyleSheet("background: #2b2b2b; border: 1px solid #3d3d3d; border-radius: 8px; margin: 5px; padding: 10px;")
+                
+                header = QHBoxLayout()
+                header.addWidget(QLabel(f"<b>{plat_name}</b> <font color='#888'>({len(files)} files)</font>"))
+                header.addStretch()
+                
+                dl_all_btn = QPushButton(f"Download All for {plat_name}")
+                dl_all_btn.setStyleSheet("padding: 4px 8px; font-size: 11px;")
+                dl_all_btn.clicked.connect(lambda checked, f_list=files: self.dl_fw_list(emu_name, f_list, dialog))
+                header.addWidget(dl_all_btn)
+                gl.addLayout(header)
+                
+                # Add horizontal line
+                line = QFrame()
+                line.setFrameShape(QFrame.HLine)
+                line.setFrameShadow(QFrame.Sunken)
+                line.setStyleSheet("background-color: #3d3d3d; max-height: 1px;")
+                gl.addWidget(line)
+
+                for fw in files:
                     row = QWidget()
                     row_layout = QHBoxLayout(row)
-                    row_layout.addWidget(QLabel(f"{fw['file_name']} ({fw['platform_name']})"))
-                    dl_btn = QPushButton("Download")
-                    dl_btn.clicked.connect(lambda checked, f=fw: self.dl_fw(emu_name, f, dialog))
-                    row_layout.addWidget(dl_btn)
-                    list_layout.addWidget(row)
+                    row_layout.setContentsMargins(5, 2, 5, 2)
+                    
+                    # File info
+                    name_lbl = QLabel(fw.get('file_name', 'unknown'))
+                    name_lbl.setStyleSheet("font-weight: bold;")
+                    row_layout.addWidget(name_lbl)
+                    
+                    size_val = fw.get('file_size_bytes')
+                    size_str = format_size(size_val) if size_val else "Unknown size"
+                    size_lbl = QLabel(size_str)
+                    size_lbl.setStyleSheet("color: #888;")
+                    row_layout.addWidget(size_lbl)
+                    
+                    row_layout.addStretch()
 
-        search_btn.clicked.connect(perform_search)
-        perform_search()
+                    # PS3 Special Handling
+                    if "PS3UPDAT.PUP" in str(fw.get('file_name', '')).upper() and "PS3" in plat_name.upper():
+                        ps3_btn = QPushButton("Install Firmware")
+                        ps3_btn.setStyleSheet("background: #007acc; color: white; font-weight: bold;")
+                        ps3_btn.clicked.connect(lambda checked, f=fw: self.dl_fw(emu_name, f, dialog))
+                        row_layout.addWidget(ps3_btn)
+                    else:
+                        dl_btn = QPushButton("Download")
+                        dl_btn.clicked.connect(lambda checked, f=fw: self.dl_fw(emu_name, f, dialog))
+                        row_layout.addWidget(dl_btn)
+                    
+                    gl.addWidget(row)
+                
+                list_layout.addWidget(group)
+
+        refresh()
         
         button_box = QDialogButtonBox(QDialogButtonBox.Close, dialog)
         button_box.rejected.connect(dialog.reject)
@@ -522,17 +643,79 @@ class WingosyMainWindow(QMainWindow):
             emu_data = next((e for e in all_emus if e["name"] == emu_name), None)
             if not emu_data: return False
 
+            emu_id = emu_data.get("id", "").lower()
             emu_path = emu_data.get("executable_path")
-            emu_folder = emu_data.get("id")
-            suggested = Path(emu_path).parent / "bios" if emu_path else Path(self.config.get("base_emu_path")) / emu_folder / "bios"
+
+            def get_bios_dest(emu_id, emu_executable_path):
+                emu_dir = Path(emu_executable_path).parent if emu_executable_path else None
+                appdata = Path(os.environ.get('APPDATA', ''))
+                localappdata = Path(os.environ.get('LOCALAPPDATA', ''))
+                
+                destinations = {
+                    "eden":        [emu_dir / "user" / "nand" / "system" if emu_dir else None,
+                                   appdata / "eden" / "nand" / "system"],
+                    "rpcs3":       [emu_dir / "dev_flash" if emu_dir else None,
+                                   appdata / "rpcs3" / "dev_flash"],
+                    "pcsx2":       [emu_dir / "bios" if emu_dir else None,
+                                   appdata / "PCSX2" / "bios"],
+                    "duckstation": [localappdata / "DuckStation" / "bios",
+                                   Path.home() / "Documents" / "DuckStation" / "bios"],
+                    "dolphin":     [emu_dir / "User" / "GC" if emu_dir else None,
+                                   Path.home() / "Documents" / "Dolphin Emulator" / "GC"],
+                    "azahar":      [appdata / "Azahar" / "nand" / "00000000000000000000000000000000" / "title"],
+                    "melonds":     [appdata / "melonDS"],
+                    "retroarch":   [emu_dir / "system" if emu_dir else None],
+                    "cemu":        [emu_dir / "keys" if emu_dir else None,
+                                   appdata / "Cemu" / "keys"],
+                }
+                
+                candidates = destinations.get(emu_id, [])
+                # Return first existing directory
+                for d in candidates:
+                    if d and d.exists():
+                        return d
+                
+                # If none exist, return first non-None candidate
+                for d in candidates:
+                    if d: return d
+                return None
+
+            suggested = get_bios_dest(emu_id, emu_path)
+            
+            if not suggested:
+                # Fallback: prompt user to pick a folder
+                folder = QFileDialog.getExistingDirectory(self, f"Select BIOS directory for {fw.get('platform_name', 'unknown')}", str(Path.home()))
+                if not folder: return False
+                suggested = Path(folder)
+            
             os.makedirs(suggested, exist_ok=True)
             target_path = suggested / fw['file_name']
+            
+            # Special PS3 logic
+            is_ps3_pup = "PS3UPDAT.PUP" in fw['file_name'].upper() and "PS3" in str(fw.get('platform_name', '')).upper()
+            
             self.log(f"🚀 BIOS: {fw['file_name']}...")
             fw_dl = BiosDownloader(self.client, fw, str(target_path))
             self.download_queue.add_download(f"BIOS: {fw['file_name']}", fw_dl)
             
             fw_dl.progress.connect(lambda d, t, s: self.log(f"DL BIOS: {100*d/t if t > 0 else 0:.1f}% @ {format_speed(s)}"))
-            fw_dl.finished.connect(lambda ok, p: self.log(f"✨ BIOS saved to {p}") if ok else self.log(f"❌ BIOS failed: {p}"))
+            
+            def on_finished(ok, p, fw_item=fw, emu_d=emu_data):
+                if ok:
+                    self.log(f"✨ BIOS saved to {p}")
+                    if is_ps3_pup and emu_d.get("executable_path"):
+                        # Offer to install
+                        res = QMessageBox.question(self, "Install PS3 Firmware", "PS3 Firmware downloaded. Would you like to launch RPCS3 to install it now?", QMessageBox.Yes | QMessageBox.No)
+                        if res == QMessageBox.Yes:
+                            import subprocess
+                            try:
+                                subprocess.Popen([emu_d["executable_path"], "--installfw", p])
+                            except Exception as e:
+                                self.log(f"❌ Failed to launch RPCS3: {e}")
+                else:
+                    self.log(f"❌ BIOS failed: {p}")
+
+            fw_dl.finished.connect(on_finished)
             fw_dl.finished.connect(lambda: self.download_queue.remove_download(fw_dl))
             fw_dl.finished.connect(lambda t=fw_dl: self.active_threads.remove(t) if t in self.active_threads else None)
             self.active_threads.append(fw_dl)

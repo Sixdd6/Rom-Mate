@@ -13,7 +13,7 @@ from PySide6.QtGui import QPixmap, QImage, QColor
 from src.ui.threads import ImageFetcher
 from src.ui.widgets import format_speed, elide_text
 from src.platforms import RETROARCH_PLATFORMS, platform_matches
-from src import emulators
+from src import emulators, download_registry
 
 CONTROLLER_MAPS = {
     "xinput": {
@@ -173,6 +173,27 @@ class GameCard(QWidget):
         self.fetcher = None
         self._full_pixmap = None
 
+        # Listen to registry for downloads/extractions
+        download_registry.add_listener(str(self.game['id']), self.on_registry_update)
+
+    def on_registry_update(self, rom_id, rtype, current, total, speed=0):
+        if rtype == "done":
+            download_registry.remove_listener(str(self.game['id']), self.on_registry_update)
+            self.set_local_exists(True)
+            QTimer.singleShot(0, self._refresh_parent_tab)
+        elif rtype == "cancelled":
+            download_registry.remove_listener(str(self.game['id']), self.on_registry_update)
+            self.set_local_exists(False)
+            QTimer.singleShot(0, self._refresh_parent_tab)
+
+    def _refresh_parent_tab(self):
+        # Traverse up to find LibraryTab
+        p = self.parent()
+        while p and not isinstance(p, LibraryTab):
+            p = p.parent()
+        if p:
+            p.apply_filters()
+
     def set_local_exists(self, exists):
         """Dynamically add or remove the local ROM checkmark."""
         self.game['_local_exists'] = exists
@@ -247,6 +268,10 @@ class GameCard(QWidget):
         if event.button() == Qt.LeftButton:
             self.clicked.emit(self.game)
 
+    def closeEvent(self, event):
+        download_registry.remove_listener(str(self.game['id']), self.on_registry_update)
+        super().closeEvent(event)
+
 class LibraryTab(QWidget):
     def __init__(self, main_window):
         # ... (rest of __init__ is unchanged)
@@ -293,12 +318,6 @@ class LibraryTab(QWidget):
         self.refresh_btn = QPushButton("🔄 Refresh")
         self.refresh_btn.clicked.connect(lambda: self.main_window.fetch_library_and_populate(force_refresh=True))
         filter_layout.addWidget(self.refresh_btn)
-
-        self.retry_btn = QPushButton("⚠️ Retry")
-        self.retry_btn.setStyleSheet("background: #e65100; color: white; padding: 4px 10px;")
-        self.retry_btn.setVisible(False)
-        self.retry_btn.clicked.connect(lambda: self.main_window.fetch_library_and_populate(force_refresh=True))
-        filter_layout.addWidget(self.retry_btn)
 
         self.main_layout.addWidget(self.filter_widget)
 
@@ -726,6 +745,10 @@ class LibraryTab(QWidget):
             # so the card can disappear or appear correctly.
             self.apply_filters()
 
+    def refresh_card_states(self):
+        """Re-apply filters to catch any registry changes (e.g. cancellations)."""
+        self.apply_filters()
+
     def populate_games(self, games, status=None):
         """Standard method to populate the grid from a list of games."""
         self.populate_grid(games)
@@ -733,6 +756,10 @@ class LibraryTab(QWidget):
             self.set_status(status)
 
     def populate_grid(self, games):
+        # Reset refresh button style
+        self.refresh_btn.setStyleSheet("")
+        self.refresh_btn.setText("🔄 Refresh")
+
         # Increment generation — any pending render callbacks will        
         # check this and abort immediately
         self._render_generation += 1
@@ -752,7 +779,6 @@ class LibraryTab(QWidget):
                 pass
         self.main_window.active_image_fetchers = []
 
-        self.retry_btn.setVisible(False)
         self._all_cards = []
         self._pending_games = list(games)  # full list, render in batches   
         self._scroll_debounce.stop()  # cancel any pending debounce on grid reset
@@ -903,8 +929,17 @@ class LibraryTab(QWidget):
             if item and item.widget():
                 item.widget().setParent(None)
 
+        # If it's an error message, highlight the refresh button
+        if any(word in message.lower() for word in ["error", "failed", "could not", "unable"]):
+            self.refresh_btn.setStyleSheet(
+                "background: #e65100; color: white; padding: 4px 10px; font-weight: bold;"
+            )
+            self.refresh_btn.setText("⚠️ Retry")
+        else:
+            self.refresh_btn.setStyleSheet("")
+            self.refresh_btn.setText("🔄 Refresh")
+
         empty_label = QLabel(message)
         empty_label.setAlignment(Qt.AlignCenter)
         empty_label.setStyleSheet("color: #888; font-size: 14px; padding: 40px;")
         self.grid_layout.addWidget(empty_label, 0, 0)
-        self.retry_btn.setVisible(True)

@@ -46,15 +46,17 @@ def unregister(rom_id):
     entry = _registry.get(rom_id)
     if not entry:
         return
-    entry["status"] = "done"
+    # Use "cancelled" if that was the last status, otherwise "done"
+    final_status = "cancelled" if entry.get("status") == "cancelled" else "done"
+    entry["status"] = final_status
     # Notify BEFORE removing
     for cb in list(entry["listeners"]):
         try:
-            cb(rom_id, "done", entry["progress"][0], entry["progress"][1])
+            cb(rom_id, final_status, entry["progress"][0], entry["progress"][1])
         except Exception:
             pass
     _registry.pop(rom_id, None)
-    logging.debug(f"[Registry] Unregistered {rom_id}")
+    logging.debug(f"[Registry] Unregistered {rom_id} (status: {final_status})")
 
 def add_listener(rom_id, callback):
     rom_id = str(rom_id)
