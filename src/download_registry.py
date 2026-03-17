@@ -13,6 +13,18 @@ _registry = {}
 
 def register_download(rom_id, rom_name, thread):
     rom_id = str(rom_id)
+    if rom_id in _registry:
+        old_entry = _registry[rom_id]
+        if old_entry.get("thread"):
+            old_entry["thread"].quit()
+            old_entry["thread"].wait(500)
+        for cb in list(old_entry.get("listeners", [])):
+            try:
+                cb(rom_id, "cancelled", old_entry["progress"][0], old_entry["progress"][1])
+            except Exception:
+                pass
+        _registry.pop(rom_id)
+
     _registry[rom_id] = {
         "type": "download",
         "thread": thread,
@@ -25,6 +37,18 @@ def register_download(rom_id, rom_name, thread):
 
 def register_extraction(rom_id, rom_name, thread):
     rom_id = str(rom_id)
+    if rom_id in _registry:
+        old_entry = _registry[rom_id]
+        if old_entry.get("thread"):
+            old_entry["thread"].quit()
+            old_entry["thread"].wait(500)
+        for cb in list(old_entry.get("listeners", [])):
+            try:
+                cb(rom_id, "cancelled", old_entry["progress"][0], old_entry["progress"][1])
+            except Exception:
+                pass
+        _registry.pop(rom_id)
+
     _registry[rom_id] = {
         "type": "extraction",
         "thread": thread,

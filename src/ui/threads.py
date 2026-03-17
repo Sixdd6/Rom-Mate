@@ -455,8 +455,12 @@ class RomDownloader(QThread):
             if self.rom_id:
                 download_registry.unregister(self.rom_id)
             self.cancelled.emit()
+        elif not success:
+            if self.rom_id:
+                download_registry.unregister(self.rom_id)
+            self.finished.emit(False, self.target_path)
         else:
-            self.finished.emit(success, self.target_path)
+            self.finished.emit(True, self.target_path)
 
 class BiosDownloader(QThread):
     progress = Signal(float, float, float)

@@ -512,8 +512,8 @@ class PCSX2Strategy(SaveStrategy):
 
     def _memcards_dir(self) -> Optional[Path]:
         res = self.emulator.get("save_resolution", {})
-        save_dir = res.get("path", "")
-        if save_dir and Path(save_dir).exists():
+        save_dir = res.get("path", "") or res.get("save_dir", "")
+        if save_dir:
             return Path(save_dir)
         
         exe = self.emulator.get("executable_path", "")
@@ -709,12 +709,9 @@ class FolderStrategy(SaveStrategy):
         exe = self.emulator.get("executable_path", "")
         for hint in _EMU_SAVE_HINTS.get(emu_id, []):
             try:
-                # DuckStation/MelonDS need rom; RetroArch/PCSX2/etc need exe
-                # Most hints now handle both via type check
-                p = hint(rom)
-                if not p and not isinstance(rom, str):
-                    p = hint(exe)
-                
+                p = hint(exe) if exe else None
+                if not p or not p.exists():
+                    p = hint(rom)
                 if p and p.exists():
                     return p
             except Exception:
@@ -744,7 +741,12 @@ class FolderStrategy(SaveStrategy):
             return False
     
     def get_save_dir(self, rom: dict) -> Optional[Path]:
-        return self._base_dir(rom)
+        base = self._base_dir(rom)
+        if base:
+            return base
+        res = self.emulator.get("save_resolution", {})
+        save_dir = res.get("path") or res.get("save_dir") or res.get("srm_dir")
+        return Path(save_dir) if save_dir else None
 
 
 class DuckStationStrategy(SaveStrategy):
@@ -1038,7 +1040,6 @@ def get_strategy(config: dict, emulator: dict) -> SaveStrategy:
         if emu_id == "eden": mode = "switch"
         elif emu_id == "rpcs3": mode = "ps3"
         elif emu_id == "duckstation": mode = "duckstation"
-        elif emu_id == "pcsx2": mode = "pcsx2"
         elif emu_id in ("xenia", "xenia_canary"): mode = "xenia"
         elif emu_id in STRATEGY_REGISTRY and emu_id not in ("folder", "file", "retroarch"):
             mode = emu_id
