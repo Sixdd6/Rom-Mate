@@ -20,7 +20,11 @@ def resolve_local_rom_path(game: dict, config_data: dict) -> Optional[Path]:
     
     platform = game.get('platform_slug')
     rom_name = game.get('fs_name')
-    if not rom_name:
+    files = game.get('files') or []
+    file_obj_name = None
+    if files and isinstance(files, list) and isinstance(files[0], dict):
+        file_obj_name = files[0].get('file_name')
+    if not rom_name and not file_obj_name:
         return None
         
     # Windows Native Logic
@@ -28,14 +32,22 @@ def resolve_local_rom_path(game: dict, config_data: dict) -> Optional[Path]:
     if is_windows:
         wd = config_data.get("windows_games_dir")
         if wd:
-            # Check for folder named after ROM stem (standard Wingosy Windows install)
-            folder = Path(wd) / Path(rom_name).stem
-            if folder.exists() and folder.is_dir():
-                return folder
-            # Check direct file if not a folder-based install
-            direct = Path(wd) / rom_name
-            if direct.exists():
-                return direct
+            candidates = []
+            if file_obj_name:
+                candidates.append(file_obj_name)
+            if rom_name and rom_name not in candidates:
+                candidates.append(rom_name)
+
+            for name in candidates:
+                # Check for folder named after archive stem (standard Wingosy Windows install)
+                folder = Path(wd) / Path(name).stem
+                if folder.exists() and folder.is_dir():
+                    return folder
+
+                # Check direct file if not a folder-based install
+                direct = Path(wd) / name
+                if direct.exists():
+                    return direct
 
     # Standard Emulator ROM Logic
     base_rom = config_data.get("base_rom_path")
@@ -43,7 +55,7 @@ def resolve_local_rom_path(game: dict, config_data: dict) -> Optional[Path]:
         return None
     
     base_path = Path(base_rom)
-    stem = Path(rom_name).stem
+    stem = Path(rom_name or file_obj_name).stem
     
     # Exclusion list: .cue files are often metadata and not what we want to launch/hash
     excluded_exts = {'.cue'}
@@ -52,15 +64,28 @@ def resolve_local_rom_path(game: dict, config_data: dict) -> Optional[Path]:
         return p.suffix.lower() in excluded_exts
 
     # 1. Base / Platform / Filename (Exact)
-    if platform:
+    if platform and rom_name:
         p1 = base_path / platform / rom_name
         if p1.exists() and not is_excluded(p1):
             return p1
+
+    # 1b. Base / Platform / Server file_name (Exact)
+    if platform and file_obj_name:
+        p1b = base_path / platform / file_obj_name
+        if p1b.exists() and not is_excluded(p1b):
+            return p1b
             
     # 2. Base / Filename (Exact)
-    p2 = base_path / rom_name
-    if p2.exists() and not is_excluded(p2):
-        return p2
+    if rom_name:
+        p2 = base_path / rom_name
+        if p2.exists() and not is_excluded(p2):
+            return p2
+
+    # 2b. Base / Server file_name (Exact)
+    if file_obj_name:
+        p2b = base_path / file_obj_name
+        if p2b.exists() and not is_excluded(p2b):
+            return p2b
 
     # 3. Fuzzy extension matching fallbacks
     # Common disc and ROM formats: .chd, .iso, .cso, .pbp, .bin, .img, .mdf, .z64, .n64, .v64
@@ -79,12 +104,29 @@ def resolve_local_rom_path(game: dict, config_data: dict) -> Optional[Path]:
         p_folder = base_path / platform / stem
         if p_folder.exists() and p_folder.is_dir():
             return p_folder
+
+    # 4b. Extracted-file fallback: look for any file with matching stem in the most likely folders.
+    # This helps when a downloaded archive (zip/7z) contains a ROM with a different extension than fs_name.
+    scan_dirs = []
+    if platform:
+        scan_dirs.append(base_path / platform)
+    scan_dirs.append(base_path)
+
+    for d in scan_dirs:
+        if not d.exists() or not d.is_dir():
+            continue
+        try:
+            for p in d.glob(stem + ".*"):
+                if p.exists() and p.is_file() and not is_excluded(p):
+                    return p
+        except Exception:
+            pass
         
     # 5. Recursive Search (v0.5.7 legacy fallback)
     # Only do this if base_rom is a valid directory to avoid hangs
     if base_path.is_dir():
         # Build set of all candidate names including original
-        all_candidates = {rom_name} | {stem + ext for ext in extensions} | {stem}
+        all_candidates = {n for n in [rom_name, file_obj_name] if n} | {stem + ext for ext in extensions} | {stem}
         
         for root, dirs, files in os.walk(base_rom):
             # Check files first

@@ -265,23 +265,20 @@ class GameCard(QWidget):
     def set_image(self, game_id, pixmap):
         try:
             self._full_pixmap = pixmap
-            # Store detected aspect ratio in parent LibraryTab config (memory only)
-            if pixmap.width() > 0:
-                detected_ratio = pixmap.height() / pixmap.width()
-                p = self.parent()
-                while p and not isinstance(p, LibraryTab):
-                    p = p.parent()
-                if p:
-                    p.config.data["cover_aspect_ratio"] = detected_ratio
-            # Let _resize_all_cards handle all painting — it's the single source of truth
             w = self.img_label.width()
             h = self.img_label.height()
             if w > 0 and h > 0:
                 self.img_label.setPixmap(
                     pixmap.scaled(w, h,
-                        Qt.KeepAspectRatioByExpanding,
+                        Qt.KeepAspectRatio,
                         Qt.SmoothTransformation)
                 )
+
+            p = self.parent()
+            while p and not isinstance(p, LibraryTab):
+                p = p.parent()
+            if p:
+                QTimer.singleShot(0, p._resize_all_cards)
         except RuntimeError:
             pass
 
@@ -532,7 +529,7 @@ class LibraryTab(QWidget):
                 return True
             return False
 
-        _, _, cols = self._get_card_size()
+        _, cols = self._get_card_size()
         idx = self._selected_index
         
         if key == Qt.Key_Right:
@@ -599,25 +596,32 @@ class LibraryTab(QWidget):
         spacing = self.grid_layout.horizontalSpacing() * (cols - 1) + 20    
         available = self.scroll_area.viewport().width() - spacing
         w = max(100, available // cols)
-        aspect = float(self.config.get("cover_aspect_ratio", 1.5))
-        h = int(w * aspect)
-        return w, h, cols
+        return w, cols
 
     def _resize_all_cards(self):
         """Resize every rendered card to match current viewport width."""   
         if not self._all_cards:
             return
-        w, h, cols = self._get_card_size()
+        w, cols = self._get_card_size()
         self.grid_widget.setUpdatesEnabled(False)
         try:
             for card in self._all_cards:
-                card.setFixedSize(w, h)
-                card.img_label.setFixedSize(w - 10, h - 30)
-                if card._full_pixmap:
+                img_w = max(1, w - 10)
+                title_h = 30
+
+                if card._full_pixmap and not card._full_pixmap.isNull() and card._full_pixmap.width() > 0:
+                    ratio = card._full_pixmap.height() / card._full_pixmap.width()
+                    img_h = max(1, int(img_w * ratio))
+                else:
+                    img_h = max(1, int(img_w * 1.5))
+
+                card.setFixedSize(w, img_h + title_h)
+                card.img_label.setFixedSize(img_w, img_h)
+                if card._full_pixmap and not card._full_pixmap.isNull():
                     card.img_label.setPixmap(
                         card._full_pixmap.scaled(
-                            w - 10, h - 30,
-                            Qt.KeepAspectRatioByExpanding,
+                            img_w, img_h,
+                            Qt.KeepAspectRatio,
                             Qt.SmoothTransformation
                         )
                     )
@@ -754,7 +758,7 @@ class LibraryTab(QWidget):
                             pass
                 
                 # 3. Re-add only visible ones in order
-                _, _, cols = self._get_card_size()
+                _, cols = self._get_card_size()
                 for idx, card in enumerate(visible_cards):
                     # RACE CONDITION GUARD
                     if my_filter_gen != self._filter_generation: return
@@ -917,7 +921,7 @@ class LibraryTab(QWidget):
                 pass
             self._load_more_label = None
 
-        card_w, card_h, cols_per_row = self._get_card_size()
+        card_w, cols_per_row = self._get_card_size()
 
         self.grid_widget.setUpdatesEnabled(False)
         try:
@@ -936,9 +940,12 @@ class LibraryTab(QWidget):
                     if game.get('_local_exists'):
                         card.set_local_exists(True)
                     card.clicked.connect(lambda g=game: self.open_detail(g))
-        
-                    card.setFixedSize(card_w, card_h)
-                    card.img_label.setFixedSize(card_w - 10, card_h - 30)       
+
+                    img_w = max(1, card_w - 10)
+                    title_h = 30
+                    img_h = max(1, int(img_w * 1.5))
+                    card.setFixedSize(card_w, img_h + title_h)
+                    card.img_label.setFixedSize(img_w, img_h)
                     card.title_label.setFixedWidth(card_w - 10)
                     self.grid_layout.addWidget(card, row, col)
                     self._all_cards.append(card)

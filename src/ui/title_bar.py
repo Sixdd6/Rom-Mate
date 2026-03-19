@@ -1,7 +1,7 @@
 import os
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QLabel, QPushButton, 
                              QSpacerItem, QSizePolicy)
-from PySide6.QtGui import QIcon, QPixmap, Qt
+from PySide6.QtGui import QFont, QIcon, QPixmap, Qt
 from PySide6.QtCore import Signal, Slot, QPoint
 
 from src.ui.widgets import get_resource_path
@@ -14,6 +14,8 @@ class WingosyTitleBar(QWidget):
         super().__init__(parent)
         self.setFixedHeight(40)
         self._drag_pos = None
+
+        self._ctrl_btn_font = QFont("Segoe MDL2 Assets")
         
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(8, 0, 0, 0)
@@ -61,6 +63,11 @@ class WingosyTitleBar(QWidget):
         self.gamepad_indicator.setStyleSheet("color: #4caf50; font-size: 14px; padding: 0 10px;")
         self.layout.addWidget(self.gamepad_indicator)
 
+        self.activity_label = QLabel()
+        self.activity_label.setVisible(False)
+        self.activity_label.setStyleSheet("color: #ddd; font-size: 11px; padding: 0 10px;")
+        self.layout.addWidget(self.activity_label)
+
         # CENTER (Stretch)
         self.layout.addStretch()
 
@@ -85,9 +92,9 @@ class WingosyTitleBar(QWidget):
         self.layout.addWidget(self.sep2)
 
         # Window Controls
-        self.min_btn = self._create_ctrl_btn("─", self._minimize)
-        self.max_btn = self._create_ctrl_btn("□", self._maximize_restore)
-        self.close_btn = self._create_ctrl_btn("✕", self._close)
+        self.min_btn = self._create_ctrl_btn("\ue921", self._minimize)
+        self.max_btn = self._create_ctrl_btn("\ue922", self._maximize_restore)
+        self.close_btn = self._create_ctrl_btn("\ue8bb", self._close)
         self.close_btn.setObjectName("closeBtn")
 
         self.layout.addWidget(self.min_btn)
@@ -102,6 +109,17 @@ class WingosyTitleBar(QWidget):
         """)
         
         self.set_active_tab(0)
+
+    def set_activity(self, text):
+        if not text:
+            self.clear_activity()
+            return
+        self.activity_label.setText(str(text))
+        self.activity_label.setVisible(True)
+
+    def clear_activity(self):
+        self.activity_label.setVisible(False)
+        self.activity_label.setText("")
 
     def _create_nav_btn(self, text, index):
         btn = QPushButton(text)
@@ -130,13 +148,14 @@ class WingosyTitleBar(QWidget):
     def _create_ctrl_btn(self, text, callback):
         btn = QPushButton(text)
         btn.setFixedSize(40, 40)
+        btn.setFont(self._ctrl_btn_font)
         btn.clicked.connect(callback)
         btn.setStyleSheet("""
             QPushButton {
                 border: none;
                 background: transparent;
                 color: #ffffff;
-                font-size: 14px;
+                font-size: 10px;
             }
             QPushButton:hover {
                 background: rgba(255,255,255,0.1);
@@ -166,16 +185,19 @@ class WingosyTitleBar(QWidget):
             self.status_dot.setStyleSheet("background: #f44336; border-radius: 4px;")
             self.status_text.setText("Disconnected")
 
+    def set_maximized(self, maximized: bool):
+        self.max_btn.setText("\ue923" if maximized else "\ue922")
+
     def _minimize(self):
         self.window().showMinimized()
 
     def _maximize_restore(self):
         if self.window().isMaximized():
             self.window().showNormal()
-            self.max_btn.setText("□")
+            self.set_maximized(False)
         else:
             self.window().showMaximized()
-            self.max_btn.setText("❐")
+            self.set_maximized(True)
 
     def _close(self):
         self.window().close()

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QMessageBox, QDialog, QLineEdit, QDialogButtonBox, 
                              QScrollArea, QFrame)
 from PySide6.QtGui import QIcon, QPixmap, QKeySequence, QShortcut
-from PySide6.QtCore import Qt, QSettings, Slot, Signal, QThread, QTimer, QEvent, QPoint
+from PySide6.QtCore import Qt, QSettings, Slot, Signal, QThread, QTimer, QEvent, QPoint, QRect
 
 from src.ui.threads import (ImageFetcher, BiosDownloader, DolphinDownloader, 
                             DirectDownloader, GithubDownloader, ConflictResolveThread,
@@ -70,6 +70,8 @@ class WingosyMainWindow(QMainWindow):
         self.active_image_fetchers = []
         self.fetch_generation = 0
         self.all_games = []
+        self._loaded_game_ids = set()
+        self._force_refreshing = False
         
         # Custom window frame setup
         self.setWindowFlags(Qt.Window)
@@ -83,6 +85,8 @@ class WingosyMainWindow(QMainWindow):
         geometry = settings.value("geometry")
         if geometry:
             self.restoreGeometry(geometry)
+
+        QTimer.singleShot(50, self._ensure_window_within_screen)
         
         icon_path = get_resource_path("icon.png")
         if os.path.exists(icon_path):
@@ -124,6 +128,7 @@ class WingosyMainWindow(QMainWindow):
         self.title_bar = WingosyTitleBar(self)
         self.title_bar.tab_changed.connect(self._on_tab_changed)
         main_layout.addWidget(self.title_bar)
+        self.title_bar.set_maximized(self.isMaximized())
         
         # Update connection status
         host = self.config.get("host", "")
@@ -194,6 +199,11 @@ class WingosyMainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self.library_tab.search_input.setFocus)
         QShortcut(QKeySequence("F5"), self, activated=self.fetch_library_and_populate)
 
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowStateChange and hasattr(self, "title_bar"):
+            self.title_bar.set_maximized(self.isMaximized())
+        super().changeEvent(event)
+
     def _on_tab_changed(self, index):
         self.tabs.setCurrentIndex(index)
         self.title_bar.set_active_tab(index)
@@ -202,6 +212,56 @@ class WingosyMainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):
         return super().eventFilter(obj, event)
+
+    def _ensure_window_within_screen(self):
+        try:
+            if self.isMaximized() or self.isFullScreen():
+                return
+
+            frame_rect = self.frameGeometry()
+            client_rect = self.geometry()
+            if frame_rect.isNull() or client_rect.isNull() or frame_rect.width() <= 0 or frame_rect.height() <= 0:
+                return
+
+            screen = QApplication.screenAt(frame_rect.center()) or self.screen() or QApplication.primaryScreen()
+            if screen is None:
+                return
+
+            avail = screen.availableGeometry()
+            if avail.isNull() or avail.width() <= 0 or avail.height() <= 0:
+                return
+
+            w = min(frame_rect.width(), avail.width())
+            h = min(frame_rect.height(), avail.height())
+
+            x = frame_rect.x()
+            y = frame_rect.y()
+
+            if x < avail.left():
+                x = avail.left()
+            if y < avail.top():
+                y = avail.top()
+            if x + w > avail.right():
+                x = max(avail.left(), avail.right() - w + 1)
+            if y + h > avail.bottom():
+                y = max(avail.top(), avail.bottom() - h + 1)
+
+            new_frame = QRect(x, y, w, h)
+            if new_frame != frame_rect:
+                left_delta = client_rect.left() - frame_rect.left()
+                top_delta = client_rect.top() - frame_rect.top()
+                right_delta = frame_rect.right() - client_rect.right()
+                bottom_delta = frame_rect.bottom() - client_rect.bottom()
+
+                new_client = QRect(
+                    new_frame.left() + left_delta,
+                    new_frame.top() + top_delta,
+                    max(1, new_frame.width() - left_delta - right_delta),
+                    max(1, new_frame.height() - top_delta - bottom_delta),
+                )
+                self.setGeometry(new_client)
+        except Exception:
+            return
 
     def _load_library_from_cache(self):
         """Load library_cache.json synchronously on startup for instant display."""
@@ -245,7 +305,14 @@ class WingosyMainWindow(QMainWindow):
         
         self._discovery_worker = LocalDiscoveryWorker(games, self.config.data)
         self._discovery_worker.rom_discovered.connect(self._on_rom_discovered)
+        self._discovery_worker.finished_discovery.connect(self._on_local_discovery_finished)
+        if hasattr(self, 'title_bar'):
+            self.title_bar.set_activity("Scanning local ROMs...")
         self._discovery_worker.start()
+
+    def _on_local_discovery_finished(self):
+        if hasattr(self, 'title_bar'):
+            self.title_bar.clear_activity()
 
     @Slot(int, str)
     def _on_rom_discovered(self, game_id, local_path):
@@ -278,6 +345,8 @@ class WingosyMainWindow(QMainWindow):
         force_refresh=True: wipe cache display, fetch fresh from server.
         """
         self.library_tab.refresh_btn.setEnabled(False)
+        self.library_tab.search_input.setEnabled(False)
+        self.library_tab.platform_filter.setEnabled(False)
         self._library_fetch_done = False
         
         if not force_refresh:
@@ -286,6 +355,7 @@ class WingosyMainWindow(QMainWindow):
             if cached:
                 cached = [g for g in cached if isinstance(g, dict)]
                 self.all_games = cached
+                self._loaded_game_ids = {g.get('id') for g in cached if g.get('id') is not None}
                 # Ensure platform filter is updated for cached games (saves/restores current)
                 self._update_platform_filter(cached)
                 # Respect current filters instead of showing all
@@ -296,19 +366,32 @@ class WingosyMainWindow(QMainWindow):
         else:
             self.log("🔄 Force refresh — fetching from server...")
             self.all_games = []
+            self._loaded_game_ids = set()
             self.library_tab.populate_grid([]) # Clear grid for fresh fetch
+
+        self._force_refreshing = bool(force_refresh)
 
         # Step B — Show status
         self.library_tab.set_status("Connecting to RomM server...")
+        if hasattr(self, 'title_bar'):
+            self.title_bar.set_activity("Loading library...")
 
         # Step C — Start worker
         cached_non_empty = len(self.all_games) > 0
         self._fetch_thread = LibraryFetchWorker(self.client, cached_non_empty=cached_non_empty)
         self._fetch_thread.finished.connect(self._on_library_fetched)
-        self._fetch_thread.error.connect(lambda: self.library_tab.set_status("Could not connect to RomM server. Check your settings.", color="#b71c1c"))
+        self._fetch_thread.error.connect(self._on_library_fetch_error)
         self._fetch_thread.retrying.connect(lambda: self.library_tab.set_status("Server is slow, retrying with longer timeout... (this may take a few minutes)", color="#e65100"))
         self._fetch_thread.batch_ready.connect(self._on_library_batch)
         self._fetch_thread.start()
+
+    def _on_library_fetch_error(self):
+        self.library_tab.set_status("Could not connect to RomM server. Check your settings.", color="#b71c1c")
+        self.library_tab.refresh_btn.setEnabled(True)
+        self.library_tab.search_input.setEnabled(True)
+        self.library_tab.platform_filter.setEnabled(True)
+        if hasattr(self, 'title_bar'):
+            self.title_bar.clear_activity()
 
     def _on_library_batch(self, batch, total):
         """Called as each page arrives from parallel fetcher."""
@@ -319,28 +402,45 @@ class WingosyMainWindow(QMainWindow):
         # For simplicity in this progressive view, if we're not force-refreshing,
         # we might just wait for final fetch. But user wants progressive.
         
-        # If this is the FIRST batch of a fresh fetch or first launch:
-        is_first_batch = (len(self.all_games) == 0 or len(self.all_games) == len(batch))
-        
-        if is_first_batch:
+        if self._force_refreshing and not self._loaded_game_ids:
             already_found = {g['id'] for g in self.all_games if g.get('_local_exists')}
             self.all_games = list(batch)
+            self._loaded_game_ids = {g.get('id') for g in self.all_games if g.get('id') is not None}
             for g in self.all_games:
-                if g['id'] in already_found:
+                if g.get('id') in already_found:
                     g['_local_exists'] = True
             self.library_tab.populate_grid(self.all_games)
         else:
-            # Append subsequent batches
-            self.all_games.extend(batch)
-            self.library_tab.append_batch(batch)
+            unique_batch = []
+            for g in batch:
+                gid = g.get('id') if isinstance(g, dict) else None
+                if gid is None or gid in self._loaded_game_ids:
+                    continue
+                self._loaded_game_ids.add(gid)
+                unique_batch.append(g)
+
+            if unique_batch:
+                self.all_games.extend(unique_batch)
+                self.library_tab.append_batch(unique_batch)
         
         # Update status
-        self.library_tab.set_status(f"Loading library... ({len(self.all_games)} / {total} games)")
+        loaded = len(self._loaded_game_ids)
+        if isinstance(total, int) and total >= 0:
+            loaded = min(loaded, total)
+        if isinstance(total, int) and total >= 0 and loaded >= total:
+            self.library_tab.set_status("Rendering library...")
+            if hasattr(self, 'title_bar'):
+                self.title_bar.set_activity("Rendering library...")
+        else:
+            self.library_tab.set_status(f"Loading library... ({loaded} / {total} games)")
+            if hasattr(self, 'title_bar'):
+                self.title_bar.set_activity(f"Loading library... ({loaded}/{total})")
 
     def _on_library_fetched(self, res):
         self._library_fetch_done = True
-        self.library_tab.set_status(None) # Hide
-        self.library_tab.refresh_btn.setEnabled(True)
+        self.library_tab.set_status("Building library view...")
+        if hasattr(self, 'title_bar'):
+            self.title_bar.set_activity("Building library view...")
         
         if res == "REAUTH_REQUIRED":
             QMessageBox.warning(self, "Session Expired", 
@@ -356,18 +456,30 @@ class WingosyMainWindow(QMainWindow):
         if not isinstance(res, list):
             self.log("❌ Unexpected response from server. Check your RomM version.")
             return
-        
+
         self.log(f"✅ Library fully loaded: {len(res)} games")
-        # Ensure final state is correct (in case batches arrived out of order or were incomplete)
         already_found = {g['id'] for g in self.all_games if g.get('_local_exists')}
+        QTimer.singleShot(0, lambda r=res, found=already_found: self._finalize_library_loaded(r, found))
+
+    def _finalize_library_loaded(self, res, already_found):
+        # Ensure final state is correct (in case batches arrived out of order or were incomplete)
         self.all_games = res
+        self._loaded_game_ids = {g.get('id') for g in self.all_games if g.get('id') is not None}
         for g in self.all_games:
-            if g['id'] in already_found:
+            if g.get('id') in already_found:
                 g['_local_exists'] = True
 
         self._update_platform_filter(res)
         # Final render to ensure everything is in place
         self.library_tab.apply_filters()
+
+        self.library_tab.set_status(None) # Hide
+        self.library_tab.refresh_btn.setEnabled(True)
+        self.library_tab.search_input.setEnabled(True)
+        self.library_tab.platform_filter.setEnabled(True)
+        if hasattr(self, 'title_bar'):
+            self.title_bar.clear_activity()
+
         self._start_local_discovery(self.all_games)
 
     def _update_platform_filter(self, games):
@@ -1131,6 +1243,49 @@ class WingosyMainWindow(QMainWindow):
                 mi.cbSize = ctypes.sizeof(mi)
                 ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(mi))
 
+                max_left = mi.rcWork.left
+                max_top = mi.rcWork.top
+                max_right = mi.rcWork.right
+                max_bottom = mi.rcWork.bottom
+
+                if (mi.rcWork.left == mi.rcMonitor.left and mi.rcWork.top == mi.rcMonitor.top and
+                        mi.rcWork.right == mi.rcMonitor.right and mi.rcWork.bottom == mi.rcMonitor.bottom):
+                    try:
+                        ABM_GETSTATE = 0x00000004
+                        ABM_GETTASKBARPOS = 0x00000005
+                        ABS_AUTOHIDE = 0x00000001
+
+                        class _APPBARDATA(ctypes.Structure):
+                            _fields_ = [
+                                ("cbSize", ctypes.c_uint),
+                                ("hWnd", wintypes.HWND),
+                                ("uCallbackMessage", ctypes.c_uint),
+                                ("uEdge", ctypes.c_uint),
+                                ("rc", _RECT),
+                                ("lParam", ctypes.c_int),
+                            ]
+
+                        abd = _APPBARDATA()
+                        abd.cbSize = ctypes.sizeof(_APPBARDATA)
+
+                        state = ctypes.windll.shell32.SHAppBarMessage(ABM_GETSTATE, ctypes.byref(abd))
+                        if state & ABS_AUTOHIDE:
+                            ctypes.windll.shell32.SHAppBarMessage(ABM_GETTASKBARPOS, ctypes.byref(abd))
+                            ABE_LEFT = 0
+                            ABE_TOP = 1
+                            ABE_RIGHT = 2
+                            ABE_BOTTOM = 3
+                            if abd.uEdge == ABE_LEFT:
+                                max_left += 1
+                            elif abd.uEdge == ABE_TOP:
+                                max_top += 1
+                            elif abd.uEdge == ABE_RIGHT:
+                                max_right -= 1
+                            elif abd.uEdge == ABE_BOTTOM:
+                                max_bottom -= 1
+                    except Exception:
+                        max_bottom -= 1
+
                 class _POINT(ctypes.Structure):
                     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
@@ -1140,12 +1295,12 @@ class WingosyMainWindow(QMainWindow):
                                  ("ptMaxTrackSize", _POINT)]
 
                 mmi = _MINMAXINFO.from_address(msg.lParam)
-                w = mi.rcWork.right - mi.rcWork.left
-                h = mi.rcWork.bottom - mi.rcWork.top
+                w = max_right - max_left
+                h = max_bottom - max_top
                 mmi.ptMaxSize.x = w
                 mmi.ptMaxSize.y = h
-                mmi.ptMaxPosition.x = mi.rcWork.left
-                mmi.ptMaxPosition.y = mi.rcWork.top
+                mmi.ptMaxPosition.x = max_left
+                mmi.ptMaxPosition.y = max_top
                 mmi.ptMaxTrackSize.x = w
                 mmi.ptMaxTrackSize.y = h
                 return True, 0

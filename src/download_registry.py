@@ -15,14 +15,25 @@ def register_download(rom_id, rom_name, thread):
     rom_id = str(rom_id)
     if rom_id in _registry:
         old_entry = _registry[rom_id]
-        if old_entry.get("thread"):
-            old_entry["thread"].quit()
-            old_entry["thread"].wait(500)
-        for cb in list(old_entry.get("listeners", [])):
+        old_thread = old_entry.get("thread")
+        old_listeners = list(old_entry.get("listeners", []))
+        was_running = False
+        try:
+            was_running = bool(old_thread and hasattr(old_thread, "isRunning") and old_thread.isRunning())
+        except Exception:
+            was_running = False
+        if old_thread:
             try:
-                cb(rom_id, "cancelled", old_entry["progress"][0], old_entry["progress"][1])
+                old_thread.quit()
+                old_thread.wait(500)
             except Exception:
                 pass
+        if was_running:
+            for cb in old_listeners:
+                try:
+                    cb(rom_id, "cancelled", old_entry["progress"][0], old_entry["progress"][1])
+                except Exception:
+                    pass
         _registry.pop(rom_id)
 
     _registry[rom_id] = {
@@ -31,7 +42,7 @@ def register_download(rom_id, rom_name, thread):
         "rom_name": rom_name,
         "progress": (0, 0),
         "status": "downloading",
-        "listeners": []
+        "listeners": old_listeners if 'old_listeners' in locals() else []
     }
     logging.debug(f"[Registry] Registered download for {rom_name} ({rom_id})")
 
@@ -39,14 +50,25 @@ def register_extraction(rom_id, rom_name, thread):
     rom_id = str(rom_id)
     if rom_id in _registry:
         old_entry = _registry[rom_id]
-        if old_entry.get("thread"):
-            old_entry["thread"].quit()
-            old_entry["thread"].wait(500)
-        for cb in list(old_entry.get("listeners", [])):
+        old_thread = old_entry.get("thread")
+        old_listeners = list(old_entry.get("listeners", []))
+        was_running = False
+        try:
+            was_running = bool(old_thread and hasattr(old_thread, "isRunning") and old_thread.isRunning())
+        except Exception:
+            was_running = False
+        if old_thread:
             try:
-                cb(rom_id, "cancelled", old_entry["progress"][0], old_entry["progress"][1])
+                old_thread.quit()
+                old_thread.wait(500)
             except Exception:
                 pass
+        if was_running:
+            for cb in old_listeners:
+                try:
+                    cb(rom_id, "cancelled", old_entry["progress"][0], old_entry["progress"][1])
+                except Exception:
+                    pass
         _registry.pop(rom_id)
 
     _registry[rom_id] = {
@@ -55,7 +77,7 @@ def register_extraction(rom_id, rom_name, thread):
         "rom_name": rom_name,
         "progress": (0, 0),
         "status": "extracting",
-        "listeners": []
+        "listeners": old_listeners if 'old_listeners' in locals() else []
     }
     logging.debug(f"[Registry] Registered extraction for {rom_name} ({rom_id})")
 

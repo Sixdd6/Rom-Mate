@@ -5,7 +5,7 @@ import logging
 import zipfile
 import time
 from pathlib import Path
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox, QProgressBar, QScrollArea, QFileDialog, QApplication, QDialog)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox, QProgressBar, QScrollArea, QFileDialog, QApplication, QDialog, QSizePolicy)
 from PySide6.QtCore import Qt, QTimer, Signal, QThread, QPoint
 from PySide6.QtGui import QPixmap, QColor
 
@@ -177,9 +177,13 @@ class GameDetailPanel(QWidget):
         sub_layout.setSpacing(25)
 
         self.img_label = QLabel()
-        self.img_label.setFixedWidth(280)
+        self.img_label.setMaximumWidth(900)
+        self.img_label.setMinimumWidth(280)
+        self.img_label.setMinimumHeight(400)
+        self.img_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.img_label.setAlignment(Qt.AlignCenter)
         self.img_label.setStyleSheet("background: #111; border-radius: 6px;")
-        sub_layout.addWidget(self.img_label)
+        sub_layout.addWidget(self.img_label, 1)
 
         self.right_column = QVBoxLayout()
         self.right_column.setSpacing(0)
@@ -273,6 +277,8 @@ class GameDetailPanel(QWidget):
             
         self._start_image_fetch()
         self._start_desc_fetch()
+
+        self._cover_full_pixmap = None
 
     def _cleanup(self):
         rom_id = str(self.game["id"])
@@ -528,7 +534,8 @@ class GameDetailPanel(QWidget):
             def _safe_set_pixmap(g, p):
                 try:
                     if p and not p.isNull():
-                        self.img_label.setPixmap(p.scaled(280, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                        self._cover_full_pixmap = p
+                        self._update_cover_pixmap()
                     else:
                         self._render_placeholder()
                 except RuntimeError:
@@ -539,6 +546,24 @@ class GameDetailPanel(QWidget):
             self.it.start()
         else:
             self._render_placeholder()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_cover_pixmap()
+
+    def _update_cover_pixmap(self):
+        try:
+            if not self._cover_full_pixmap or self._cover_full_pixmap.isNull():
+                return
+            w = self.img_label.width()
+            h = self.img_label.height()
+            if w <= 0 or h <= 0:
+                return
+            self.img_label.setPixmap(
+                self._cover_full_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        except RuntimeError:
+            return
 
     def _render_placeholder(self):
         from PySide6.QtGui import QPainter, QFont
@@ -551,7 +576,8 @@ class GameDetailPanel(QWidget):
         painter.setFont(QFont("Arial", 16, QFont.Bold))
         painter.drawText(QRect(0, 0, w, h), Qt.AlignCenter, "No Cover")
         painter.end()
-        self.img_label.setPixmap(pixmap)
+        self._cover_full_pixmap = pixmap
+        self._update_cover_pixmap()
             
     def _start_desc_fetch(self):
         self.dt = GameDescriptionFetcher(self.client, self.game['id'])
