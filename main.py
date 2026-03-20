@@ -55,12 +55,13 @@ logging.info(f"argv={sys.argv}")
 logging.info(f"cwd={os.getcwd()}")
 
 from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QTimer
 from src.config import ConfigManager
 from src.api import RomMClient
 from src.watcher import WingosyWatcher
 from src.ui import WingosyMainWindow, SetupDialog
 
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 
 def _cleanup_old_mei_folders():
     """Delete stale PyInstaller _MEI temp folders from previous runs."""
@@ -185,7 +186,6 @@ def main():
     window.show()
     
     # Delay MEI cleanup to ensure certifi bundle is loaded
-    from PySide6.QtCore import QTimer
     QTimer.singleShot(30000, _cleanup_old_mei_folders)
     
     sys.exit(app.exec())

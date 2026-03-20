@@ -80,8 +80,13 @@ class WingosyMainWindow(QMainWindow):
         # Custom window frame setup
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
 
-        # After window is shown, call Windows API to remove title bar but keep resize border
-        QTimer.singleShot(0, self._apply_windows_frame)
+        # Apply Windows frame tweaks as early as possible to avoid a visible frame transition
+        try:
+            self.setAttribute(Qt.WA_NativeWindow, True)
+            self.winId()
+            self._apply_windows_frame()
+        except Exception:
+            pass
 
         self.setWindowTitle("Wingosy Launcher")
         self.resize(1100, 800)
@@ -1172,6 +1177,23 @@ class WingosyMainWindow(QMainWindow):
             import ctypes.wintypes as wintypes
             
             hwnd = int(self.winId())
+
+            try:
+                DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                DWMWA_BORDER_COLOR = 34
+                DWMWA_CAPTION_COLOR = 35
+
+                _true = ctypes.c_int(1)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, ctypes.byref(_true), ctypes.sizeof(_true))
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(_true), ctypes.sizeof(_true))
+
+                # COLORREF is 0x00BBGGRR
+                _dark = wintypes.DWORD(0x00121212)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ctypes.byref(_dark), ctypes.sizeof(_dark))
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ctypes.byref(_dark), ctypes.sizeof(_dark))
+            except Exception:
+                pass
             
             # MARGINS struct — extend frame into client area on all sides by 1px
             # This removes title bar but keeps the resize border and snap behavior
