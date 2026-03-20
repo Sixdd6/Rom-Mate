@@ -150,3 +150,48 @@ def update_status(rom_id, status):
                     cb(rom_id, "cancelled", entry["progress"][0], entry["progress"][1])
                 except Exception:
                     pass
+
+def shutdown_all(timeout_ms=1500):
+    try:
+        entries = list((_registry or {}).items())
+    except Exception:
+        entries = []
+
+    for rom_id, entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        t = entry.get("thread")
+        if not t:
+            continue
+
+        try:
+            update_status(rom_id, "cancelled")
+        except Exception:
+            pass
+
+        try:
+            if hasattr(t, "cancel"):
+                t.cancel()
+        except Exception:
+            pass
+        try:
+            if hasattr(t, "requestInterruption"):
+                t.requestInterruption()
+        except Exception:
+            pass
+        try:
+            if hasattr(t, "quit"):
+                t.quit()
+        except Exception:
+            pass
+        try:
+            if hasattr(t, "wait"):
+                t.wait(timeout_ms)
+        except Exception:
+            pass
+        try:
+            if hasattr(t, "isRunning") and t.isRunning():
+                t.terminate()
+                t.wait(500)
+        except Exception:
+            pass

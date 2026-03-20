@@ -27,6 +27,7 @@ from src.ui.tabs.settings import SettingsTab
 from src.utils import zip_path, resolve_local_rom_path
 from src.platforms import RETROARCH_PLATFORMS, platform_matches
 from src import emulators
+from src import download_registry
 
 class LibraryFetchWorker(QThread):
     finished = Signal(object)    # emits the final list or "REAUTH_REQUIRED"
@@ -338,6 +339,7 @@ class WingosyMainWindow(QMainWindow):
         
         self._discovery_worker = LocalDiscoveryWorker(games, self.config.data)
         self._discovery_worker.rom_discovered.connect(self._on_rom_discovered)
+        self._discovery_worker.rom_missing.connect(self._on_rom_missing)
         self._discovery_worker.finished_discovery.connect(self._on_local_discovery_finished)
         if hasattr(self, 'title_bar'):
             self.title_bar.set_activity("Scanning local ROMs...")
@@ -357,6 +359,17 @@ class WingosyMainWindow(QMainWindow):
         
         # Update UI if library tab is showing this game
         self.library_tab.update_game_local_status(game_id, True)
+
+    @Slot(int)
+    def _on_rom_missing(self, game_id):
+        # Clear flag in main list (important for Windows games where install state can change)
+        for g in self.all_games:
+            if g.get('id') == game_id:
+                g['_local_exists'] = False
+                break
+
+        # Update UI if library tab is showing this game
+        self.library_tab.update_game_local_status(game_id, False)
 
     def _on_image_fetched(self, fetcher, generation=None):
         if generation is not None and generation != self.fetch_generation:
@@ -1169,16 +1182,7 @@ class WingosyMainWindow(QMainWindow):
             return
 
     def closeEvent(self, event):
-        # Stop watcher thread gracefully
-        if hasattr(self, 'watcher') and self.watcher:
-            self.watcher.running = False
-            self.watcher.quit()
-            self.watcher.wait(3000)  # wait up to 3 seconds
-        
-        # Stop library fetch worker if running
-        if hasattr(self, '_fetch_thread') and self._fetch_thread.isRunning():
-            self._fetch_thread.quit()
-            self._fetch_thread.wait(2000)
+        self._shutdown_threads()
         
         settings = QSettings("Wingosy", "WingosyLauncher")
         try:
@@ -1194,6 +1198,148 @@ class WingosyMainWindow(QMainWindow):
         if not self.isMaximized() and not self.isFullScreen():
             settings.setValue("geometry", self.saveGeometry())
         event.accept()
+
+    def _shutdown_threads(self):
+        try:
+            download_registry.shutdown_all(timeout_ms=1500)
+        except Exception:
+            pass
+
+        # Stop watcher thread (and its background sync threads) gracefully
+        try:
+            watcher = getattr(self, 'watcher', None)
+        except Exception:
+            watcher = None
+        if watcher:
+            try:
+                if hasattr(watcher, 'shutdown'):
+                    watcher.shutdown(watcher_timeout_ms=3000, sync_timeout_ms=2000)
+                else:
+                    watcher.running = False
+                    watcher.quit()
+                    watcher.wait(3000)
+            except Exception:
+                pass
+
+        # Stop library fetch worker if running
+        try:
+            ft = getattr(self, '_fetch_thread', None)
+        except Exception:
+            ft = None
+        if ft and hasattr(ft, 'isRunning') and ft.isRunning():
+            try:
+                if hasattr(ft, 'requestInterruption'):
+                    ft.requestInterruption()
+            except Exception:
+                pass
+            try:
+                ft.quit()
+            except Exception:
+                pass
+            try:
+                ft.wait(2000)
+            except Exception:
+                pass
+            try:
+                if ft.isRunning():
+                    ft.terminate()
+                    ft.wait(500)
+            except Exception:
+                pass
+
+        # Stop local discovery worker
+        try:
+            dw = getattr(self, '_discovery_worker', None)
+        except Exception:
+            dw = None
+        if dw and hasattr(dw, 'isRunning') and dw.isRunning():
+            try:
+                if hasattr(dw, 'stop'):
+                    dw.stop()
+            except Exception:
+                pass
+            try:
+                if hasattr(dw, 'requestInterruption'):
+                    dw.requestInterruption()
+            except Exception:
+                pass
+            try:
+                dw.quit()
+            except Exception:
+                pass
+            try:
+                dw.wait(2000)
+            except Exception:
+                pass
+            try:
+                if dw.isRunning():
+                    dw.terminate()
+                    dw.wait(500)
+            except Exception:
+                pass
+
+        # Stop any image fetchers
+        try:
+            fetchers = list(getattr(self, 'active_image_fetchers', []) or [])
+        except Exception:
+            fetchers = []
+        for f in fetchers:
+            if not f:
+                continue
+            try:
+                if hasattr(f, 'requestInterruption'):
+                    f.requestInterruption()
+            except Exception:
+                pass
+            try:
+                f.quit()
+            except Exception:
+                pass
+            try:
+                f.wait(1000)
+            except Exception:
+                pass
+            try:
+                if hasattr(f, 'isRunning') and f.isRunning():
+                    f.terminate()
+                    f.wait(500)
+            except Exception:
+                pass
+
+        # Stop any other active threads we track (downloaders, extractors, etc.)
+        try:
+            threads = list(getattr(self, 'active_threads', []) or [])
+        except Exception:
+            threads = []
+        for t in threads:
+            if not t:
+                continue
+            try:
+                if hasattr(t, 'cancel'):
+                    t.cancel()
+            except Exception:
+                pass
+            try:
+                if hasattr(t, 'requestInterruption'):
+                    t.requestInterruption()
+            except Exception:
+                pass
+            try:
+                if hasattr(t, 'quit'):
+                    t.quit()
+            except Exception:
+                pass
+            try:
+                if hasattr(t, 'wait'):
+                    t.wait(1500)
+            except Exception:
+                pass
+            try:
+                if hasattr(t, 'isRunning') and t.isRunning():
+                    t.terminate()
+                    t.wait(500)
+            except Exception:
+                pass
 
     def _apply_windows_frame(self):
         import sys

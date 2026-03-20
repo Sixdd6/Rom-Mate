@@ -3,13 +3,19 @@ import os
 import logging
 from pathlib import Path
 
+from src.platforms import RETROARCH_PLATFORMS
+
+
+def _unique_list(items):
+    return list(dict.fromkeys(items))
+
 DEFAULT_EMULATORS = [
     {
         "id": "retroarch",
         "name": "Multi-Console (RetroArch)",
         "executable_path": "",
         "launch_args": ["-L", "{core_path}", "{rom_path}"],
-        "platform_slugs": ["multi", "nes", "snes", "n64", "gb", "gbc", "gba", "genesis", "mastersystem", "segacd", "gamegear", "atari2600", "psx", "psp"],
+        "platform_slugs": _unique_list(["multi"] + RETROARCH_PLATFORMS),
         "save_resolution": {
             "mode": "retroarch",
             "srm_dir": "",
@@ -234,6 +240,15 @@ def load_emulators_raw():
                 if "conflict_behavior" not in e:
                     e["conflict_behavior"] = "ask"
                     changed = True
+
+                # Merge newly-supported RetroArch platforms (e.g., Virtual Boy)
+                if e.get("id") == "retroarch":
+                    desired = set(_unique_list(["multi"] + RETROARCH_PLATFORMS))
+                    current = set(e.get("platform_slugs", []))
+                    if not desired.issubset(current):
+                        e["platform_slugs"] = _unique_list(list(current) + list(desired))
+                        changed = True
+                        logging.info("Migrated RetroArch supported platforms")
                 
                 # Migrate DuckStation to folder mode (v0.6.1)
                 if e.get("id") == "duckstation":

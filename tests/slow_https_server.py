@@ -28,6 +28,7 @@ import datetime
 import ipaddress
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -182,8 +183,9 @@ def run_server():
         print(f"[{datetime.datetime.now()}] Starting threaded slow HTTP RomM server on http://127.0.0.1:{port}")
     else:
         port = 8443
-        cert_file = Path(__file__).with_name("test_cert.pem")
-        key_file = Path(__file__).with_name("test_key.pem")
+        temp_dir = tempfile.TemporaryDirectory(prefix="wingosy-test-tls-")
+        cert_file = Path(temp_dir.name) / "test_cert.pem"
+        key_file = Path(temp_dir.name) / "test_key.pem"
         
         if not cert_file.exists() or not key_file.exists():
             print("Generating self-signed certificate...")

@@ -174,6 +174,10 @@ def main():
             sys.exit(0)
 
     window = WingosyMainWindow(config, client, WingosyWatcher, VERSION)
+    try:
+        app.aboutToQuit.connect(window._shutdown_threads)
+    except Exception:
+        pass
     window.show()
     
     # Delay MEI cleanup to ensure certifi bundle is loaded

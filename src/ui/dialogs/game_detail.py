@@ -130,6 +130,11 @@ class GameDetailPanel(QWidget):
         self.config = config
         self.main_window = main_window
         self._uninstall_dialog_open = False
+        self._pending_registry_update = None
+        self._smoothed_speed = 0.0
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setInterval(100)
+        self._flush_timer.timeout.connect(self._flush_pending_registry_update)
         
         self.dl_thread = None
         self.extract_thread = None
@@ -307,6 +312,8 @@ class GameDetailPanel(QWidget):
         rom_id = str(self.game["id"])
         if hasattr(self, '_progress_listener'):
             download_registry.remove_listener(rom_id, self._progress_listener)
+        if hasattr(self, '_flush_timer') and self._flush_timer.isActive():
+            self._flush_timer.stop()
 
     def _build_header(self, game_name):
         header = QWidget()
@@ -373,6 +380,26 @@ class GameDetailPanel(QWidget):
         download_registry.add_listener(rom_id, self._progress_listener)
 
     def _on_registry_progress(self, rom_id, rtype, current, total, speed=0):
+        if rtype in ("done", "cancelled"):
+            if self._flush_timer.isActive():
+                self._flush_timer.stop()
+            self._pending_registry_update = None
+            self._apply_registry_progress(rom_id, rtype, current, total, speed)
+            return
+
+        self._pending_registry_update = (rom_id, rtype, current, total, speed)
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_pending_registry_update(self):
+        if not self._pending_registry_update:
+            self._flush_timer.stop()
+            return
+        rom_id, rtype, current, total, speed = self._pending_registry_update
+        self._pending_registry_update = None
+        self._apply_registry_progress(rom_id, rtype, current, total, speed)
+
+    def _apply_registry_progress(self, rom_id, rtype, current, total, speed=0):
         if rtype == "done" or rtype == "cancelled":
             download_registry.remove_listener(rom_id, self._progress_listener)
             self.pbar.setVisible(False)
@@ -380,15 +407,23 @@ class GameDetailPanel(QWidget):
             self.speed_label.setText("")
             self._update_button_states()
             return
-        
+
         if total > 0:
             self.pbar.setRange(0, 100)
             self.pbar.setValue(int(current / total * 100))
         else:
             self.pbar.setRange(0, 0)
-        
+
+        if speed > 0 and rtype == "download":
+            alpha = 0.2
+            if self._smoothed_speed <= 0:
+                self._smoothed_speed = float(speed)
+            else:
+                self._smoothed_speed = (alpha * float(speed)) + ((1.0 - alpha) * self._smoothed_speed)
+
         if rtype == "download":
-            self.speed_label.setText(f"Downloading... {format_size(current)} / {format_size(total)}")
+            speed_txt = f" @ {format_speed(self._smoothed_speed)}" if self._smoothed_speed > 0 else ""
+            self.speed_label.setText(f"Downloading... {format_size(current)} / {format_size(total)}{speed_txt}")
         elif rtype == "extraction":
             if total > 0:
                 self.speed_label.setText(f"Extracting... {current}/{total} files")

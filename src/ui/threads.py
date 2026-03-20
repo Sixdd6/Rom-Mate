@@ -21,7 +21,6 @@ try:
 except ImportError:
     HAS_PY7ZR = False
 
-from src import pcgamingwiki
 from src.utils import extract_strip_root
 
 class LocalDiscoveryWorker(QThread):
@@ -30,6 +29,7 @@ class LocalDiscoveryWorker(QThread):
     Emits rom_discovered(game_id, local_path) for each found ROM.
     """
     rom_discovered = Signal(int, str)
+    rom_missing = Signal(int)
     finished_discovery = Signal()
 
     def __init__(self, games: list, config_data: dict):
@@ -43,16 +43,14 @@ class LocalDiscoveryWorker(QThread):
 
     def run(self):
         from src.utils import resolve_local_rom_path, build_rom_search_index
+        from src import windows_saves
 
         base_rom = self.config_data.get("base_rom_path")
-        win_dir = self.config_data.get("windows_games_dir")
         search_index = None
         try:
             roots = []
             if base_rom:
                 roots.append(Path(base_rom))
-            if win_dir:
-                roots.append(Path(win_dir))
             if roots:
                 search_index = build_rom_search_index(*roots)
         except Exception:
@@ -61,11 +59,22 @@ class LocalDiscoveryWorker(QThread):
             if not self._is_running:
                 break
             
-            # Skip if already marked as exists (e.g. from a previous partial scan)
-            if game.get('_local_exists'):
-                continue
-
             try:
+                platform = game.get('platform_slug')
+                is_windows = platform in ["windows", "win", "pc", "pc-windows", "windows-games", "win95", "win98"]
+                if is_windows:
+                    saved = windows_saves.get_windows_save(game.get('id'))
+                    exe = saved.get("default_exe") if isinstance(saved, dict) else None
+                    if exe and Path(exe).exists():
+                        self.rom_discovered.emit(game['id'], str(Path(exe)))
+                    else:
+                        self.rom_missing.emit(game['id'])
+                    continue
+
+                # Skip if already marked as exists (e.g. from a previous partial scan)
+                if game.get('_local_exists'):
+                    continue
+
                 path = resolve_local_rom_path(game, self.config_data, search_index=search_index)
                 if path and path.exists():
                     self.rom_discovered.emit(game['id'], str(path))
@@ -73,19 +82,6 @@ class LocalDiscoveryWorker(QThread):
                 logging.debug(f"[Discovery] Error resolving {game.get('name')}: {e}")
         
         self.finished_discovery.emit()
-
-class WikiFetcherThread(QThread):
-    finished = Signal(list)
-    def __init__(self, game_title, windows_games_dir=""):
-        super().__init__()
-        self.game_title = game_title
-        self.win_dir = windows_games_dir
-    def run(self):
-        try:
-            results = pcgamingwiki.fetch_save_locations(self.game_title, self.win_dir)
-            self.finished.emit(results)
-        except Exception:
-            self.finished.emit([])
 
 class ImageFetcher(QThread):
     finished = Signal(int, QPixmap)

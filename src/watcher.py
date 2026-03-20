@@ -206,6 +206,62 @@ class WingosyWatcher(QThread):
         from src.save_strategies import set_watcher_ref
         set_watcher_ref(self)
 
+    def shutdown(self, watcher_timeout_ms=3000, sync_timeout_ms=2000):
+        try:
+            self.running = False
+        except Exception:
+            pass
+
+        try:
+            self.requestInterruption()
+        except Exception:
+            pass
+
+        try:
+            sync_threads = list(getattr(self, "_sync_threads", []) or [])
+        except Exception:
+            sync_threads = []
+
+        for t in sync_threads:
+            if not t:
+                continue
+            try:
+                if hasattr(t, "requestInterruption"):
+                    t.requestInterruption()
+            except Exception:
+                pass
+            try:
+                if hasattr(t, "quit"):
+                    t.quit()
+            except Exception:
+                pass
+            try:
+                if hasattr(t, "wait"):
+                    t.wait(sync_timeout_ms)
+            except Exception:
+                pass
+            try:
+                if hasattr(t, "isRunning") and t.isRunning():
+                    t.terminate()
+                    t.wait(500)
+            except Exception:
+                pass
+
+        try:
+            self.quit()
+        except Exception:
+            pass
+        try:
+            self.wait(watcher_timeout_ms)
+        except Exception:
+            pass
+        try:
+            if self.isRunning():
+                self.terminate()
+                self.wait(500)
+        except Exception:
+            pass
+
     def save_cache(self):
         try:
             with open(self.cache_path, 'w') as f:

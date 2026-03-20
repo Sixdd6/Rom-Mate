@@ -1,9 +1,8 @@
 import sys
 import os
-import shutil
 import logging
 from pathlib import Path
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QMessageBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton
 from PySide6.QtCore import Qt, Signal, QTimer
 from src.platforms import RETROARCH_PLATFORMS, RETROARCH_CORES, platform_matches
 from src import download_registry
@@ -35,6 +34,8 @@ def format_size(bytes_count):
 def elide_text(text, max_chars=24):
     return text if len(text) <= max_chars else text[:max_chars].rstrip() + "…"
 
+_CANCELLED_AUTO_REMOVE_MS = 7000
+
 class DownloadRow(QWidget):
     def __init__(self, rom_id, rom_name, thread, row_type, parent_queue):
         super().__init__()
@@ -43,6 +44,11 @@ class DownloadRow(QWidget):
         self.thread = thread
         self.row_type = row_type # "download" | "extraction"
         self.parent_queue = parent_queue
+        self._pending_registry_update = None
+        self._smoothed_speed = 0.0
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setInterval(100)
+        self._flush_timer.timeout.connect(self._flush_pending_update)
         
         self.setStyleSheet("""
             DownloadRow {
@@ -131,6 +137,22 @@ class DownloadRow(QWidget):
         # Connect to registry for updates
         download_registry.add_listener(self.rom_id, self.on_registry_update)
 
+    def reset_for_new_thread(self, thread, row_type):
+        self.thread = thread
+        self.row_type = row_type
+        self._pending_registry_update = None
+        self._smoothed_speed = 0.0
+        if self._flush_timer.isActive():
+            self._flush_timer.stop()
+        self.status_badge.setText("Extracting" if row_type == "extraction" else "Downloading")
+        self._update_badge_style("progress")
+        self.cancel_btn.show()
+        self.speed_label.setText("")
+        self.pbar.setRange(0, 100)
+        self.pbar.setValue(0)
+        self.pct_label.setText("0%")
+        self.size_label.setText("0 / 0 MB")
+
     def _update_badge_style(self, status):
         colors = {
             "progress": "#1565c0" if self.row_type == "download" else "#e65100",
@@ -149,6 +171,26 @@ class DownloadRow(QWidget):
         """)
 
     def on_registry_update(self, rom_id, rtype, current, total, speed=0):
+        if rtype in ("done", "cancelled"):
+            if self._flush_timer.isActive():
+                self._flush_timer.stop()
+            self._pending_registry_update = None
+            self._apply_registry_update(rom_id, rtype, current, total, speed)
+            return
+
+        self._pending_registry_update = (rom_id, rtype, current, total, speed)
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_pending_update(self):
+        if not self._pending_registry_update:
+            self._flush_timer.stop()
+            return
+        rom_id, rtype, current, total, speed = self._pending_registry_update
+        self._pending_registry_update = None
+        self._apply_registry_update(rom_id, rtype, current, total, speed)
+
+    def _apply_registry_update(self, rom_id, rtype, current, total, speed=0):
         if rtype == "extraction":
             if self.status_badge.text() != "Extracting":
                 self.status_badge.setText("Extracting")
@@ -159,14 +201,28 @@ class DownloadRow(QWidget):
             self._on_extraction_progress(current, total)
             return
 
+        # Normal download progress/update (also covers the initial update after a restart)
+        if rtype == "download":
+            if self.status_badge.text() != "Downloading":
+                self.status_badge.setText("Downloading")
+                self.row_type = "download"
+                self._update_badge_style("progress")
+                self.cancel_btn.show()
+
         if total > 0:
             pct = int(current / total * 100)
             self.pbar.setValue(pct)
             self.pct_label.setText(f"{pct}%")
             self.size_label.setText(f"{format_size(current)} / {format_size(total)}")
-        
+
         if speed > 0:
-            self.speed_label.setText(format_speed(speed))
+            alpha = 0.2
+            if self._smoothed_speed <= 0:
+                self._smoothed_speed = float(speed)
+            else:
+                self._smoothed_speed = (alpha * float(speed)) + ((1.0 - alpha) * self._smoothed_speed)
+        if self._smoothed_speed > 0 and self.row_type == "download":
+            self.speed_label.setText(format_speed(self._smoothed_speed))
         
         if rtype == "done":
             self.status_badge.setText("Done")
@@ -179,6 +235,7 @@ class DownloadRow(QWidget):
             self._update_badge_style("cancelled")
             self.cancel_btn.hide()
             self.speed_label.setText("")
+            QTimer.singleShot(_CANCELLED_AUTO_REMOVE_MS, lambda: self.parent_queue.remove_download(self.thread))
 
     def _on_extraction_progress(self, done, total):
         if total == 0 and done == 0:
@@ -198,63 +255,10 @@ class DownloadRow(QWidget):
             self.size_label.setText(f"{done} / {total} files")
 
     def request_cancel(self):
-        if self.row_type == "extraction":
-            reply = QMessageBox.question(
-                self, "Cancel Extraction",
-                f"Cancel extracting {self.rom_name}?\n\nWhat should happen to the files extracted so far?",
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-                QMessageBox.Cancel
-            )
-            if reply == QMessageBox.Cancel: return
-            
-            # 1. Request interruption
-            self.thread.cancel()
-            if reply == QMessageBox.Discard:
-                def on_cancelled(path):
-                    import shutil
-                    shutil.rmtree(path, ignore_errors=True)
-                self.thread.cancelled.connect(on_cancelled)
-        else:
-            reply = QMessageBox.question(
-                self, "Cancel Download",
-                f"Cancel downloading {self.rom_name}?",
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-                QMessageBox.Cancel
-            )
-            if reply == QMessageBox.Cancel: return
-            
-            # 1. Request interruption
-            self.thread.cancel()
-            if reply == QMessageBox.Discard:
-                def on_cancelled_dl():
-                    p = getattr(self.thread, 'file_path', None)
-                    if p and os.path.exists(p):
-                        for _ in range(10):  # retry up to 1 second
-                            try:
-                                os.remove(p)
-                                break
-                            except PermissionError:
-                                import time
-                                time.sleep(0.1)
-                            except Exception:
-                                break
-                    # Notify library to refresh button states
-                    try:
-                        from PySide6.QtWidgets import QApplication
-                        app = QApplication.instance()
-                        if app and hasattr(app, 'main_window'):
-                            mw = app.main_window
-                            # Reset _local_exists on matching game
-                            for game in getattr(mw, 'all_games', []):
-                                if str(game.get('id')) == str(self.rom_id):
-                                    game['_local_exists'] = False
-                                    break
-                            mw.library_tab.apply_filters()
-                    except Exception:
-                        pass
-                self.thread.cancelled.connect(on_cancelled_dl)
+        # Immediately cancel without prompting (save/discard/cancel is not supported)
+        self.thread.cancel()
 
-        # 2. Update status in registry (thread will handle unregistering)
+        # Update status in registry (thread will handle unregistering)
         download_registry.update_status(self.rom_id, "cancelled")
 
         self.status_badge.setText("Cancelled")
@@ -287,20 +291,29 @@ class DownloadQueueWidget(QWidget):
         if rom_id_str and rom_id_str in self._rows_by_rom_id:
             row = self._rows_by_rom_id[rom_id_str]
             old_thread = getattr(row, "thread", None)
-            if old_thread in self._rows_by_thread:
-                del self._rows_by_thread[old_thread]
 
-            row.thread = thread
-            self._rows_by_thread[thread] = row
+            # If a cancelled row is already present for this rom, clear it immediately and
+            # create a fresh row so the UI doesn't stay stuck in the cancelled state.
+            if getattr(row, "status_badge", None) and row.status_badge.text() == "Cancelled":
+                if old_thread is not None:
+                    self.remove_download(old_thread)
+                # Proceed as a normal new row
+                rom_id_str = str(rom_id) if rom_id is not None else None
+            else:
+                if old_thread in self._rows_by_thread:
+                    del self._rows_by_thread[old_thread]
 
-            entry = download_registry.get(rom_id_str)
-            if entry:
-                current, total = entry.get("progress", (0, 0))
-                try:
-                    row.on_registry_update(rom_id_str, entry.get("type", row_type), current, total, 0)
-                except TypeError:
-                    row.on_registry_update(rom_id_str, entry.get("type", row_type), current, total)
-            return
+                row.reset_for_new_thread(thread, row_type)
+                self._rows_by_thread[thread] = row
+
+                entry = download_registry.get(rom_id_str)
+                if entry:
+                    current, total = entry.get("progress", (0, 0))
+                    try:
+                        row.on_registry_update(rom_id_str, entry.get("type", row_type), current, total, 0)
+                    except TypeError:
+                        row.on_registry_update(rom_id_str, entry.get("type", row_type), current, total)
+                return
 
         if thread in self._rows_by_thread:
             return
