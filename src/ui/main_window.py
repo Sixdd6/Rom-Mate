@@ -76,6 +76,8 @@ class WingosyMainWindow(QMainWindow):
         self._force_refreshing = False
         self._frame_applied = False
         self._last_frame_apply_ts = 0.0
+        self._restore_maximized = False
+        self._restore_maximized_applied = False
         
         # Custom window frame setup
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
@@ -91,9 +93,18 @@ class WingosyMainWindow(QMainWindow):
         self.setWindowTitle("Wingosy Launcher")
         self.resize(1100, 800)
         settings = QSettings("Wingosy", "WingosyLauncher")
-        geometry = settings.value("geometry")
-        if geometry:
-            self.restoreGeometry(geometry)
+        try:
+            self._restore_maximized = bool(settings.value("was_maximized", False))
+        except Exception:
+            self._restore_maximized = False
+
+        normal_geometry = settings.value("normal_geometry")
+        if isinstance(normal_geometry, QRect) and not normal_geometry.isNull():
+            self.setGeometry(normal_geometry)
+        else:
+            geometry = settings.value("geometry")
+            if geometry:
+                self.restoreGeometry(geometry)
 
         QTimer.singleShot(50, self._ensure_window_within_screen)
         
@@ -122,6 +133,18 @@ class WingosyMainWindow(QMainWindow):
         if self.config.get("first_run", True):
             WelcomeDialog(self).exec()
             self.config.set("first_run", False)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._restore_maximized_applied:
+            return
+        if sys.platform != "win32":
+            return
+        if not self._restore_maximized:
+            return
+
+        self._restore_maximized_applied = True
+        QTimer.singleShot(0, self.showMaximized)
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -1158,7 +1181,18 @@ class WingosyMainWindow(QMainWindow):
             self._fetch_thread.wait(2000)
         
         settings = QSettings("Wingosy", "WingosyLauncher")
-        settings.setValue("geometry", self.saveGeometry())
+        try:
+            settings.setValue("was_maximized", self.isMaximized())
+        except Exception:
+            pass
+
+        try:
+            settings.setValue("normal_geometry", self.normalGeometry())
+        except Exception:
+            pass
+
+        if not self.isMaximized() and not self.isFullScreen():
+            settings.setValue("geometry", self.saveGeometry())
         event.accept()
 
     def _apply_windows_frame(self):
@@ -1261,7 +1295,7 @@ class WingosyMainWindow(QMainWindow):
         import ctypes
         import ctypes.wintypes as wintypes
 
-        if eventType != b"windows_generic_MSG":
+        if eventType not in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
             return super().nativeEvent(eventType, message)
 
         msg = ctypes.wintypes.MSG.from_address(int(message))
@@ -1357,39 +1391,45 @@ class WingosyMainWindow(QMainWindow):
             if msg.wParam == 1:
                 return True, 0
             return False, 0
-        
+
         if msg.message == WM_NCHITTEST:
             # Screen coordinates from lParam
             x = ctypes.c_int16(msg.lParam & 0xFFFF).value
             y = ctypes.c_int16((msg.lParam >> 16) & 0xFFFF).value
-            
+
             rect = wintypes.RECT()
-            ctypes.windll.user32.GetWindowRect(int(self.winId()), ctypes.byref(rect))
-            
+            hwnd = int(self.winId())
+            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+
             # Use device pixels for border — fall back to Qt's ratio if Win API unavailable
             try:
-                dpi = ctypes.windll.user32.GetDpiForWindow(int(self.winId()))
+                dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
                 scale = dpi / 96.0
             except Exception:
                 scale = self.devicePixelRatioF()
-            
+
             b = max(4, int(8 * scale))
-            
+
             # Clamp to window bounds first
             if (x < rect.left or x > rect.right or y < rect.top or y > rect.bottom):
                 return False, 0
-            
+
             dist_left   = x - rect.left
             dist_right  = rect.right  - x
             dist_top    = y - rect.top
             dist_bottom = rect.bottom - y
-            
-            if not self.isMaximized():
+
+            try:
+                is_zoomed = bool(ctypes.windll.user32.IsZoomed(hwnd))
+            except Exception:
+                is_zoomed = self.isMaximized()
+
+            if not is_zoomed:
                 on_left   = dist_left   <= b
                 on_right  = dist_right  <= b
                 on_top    = dist_top    <= b
                 on_bottom = dist_bottom <= b
-                
+
                 HTTOPLEFT     = 13
                 HTTOPRIGHT    = 14
                 HTBOTTOMLEFT  = 16
@@ -1398,7 +1438,7 @@ class WingosyMainWindow(QMainWindow):
                 HTBOTTOM      = 15
                 HTLEFT        = 10
                 HTRIGHT       = 11
-                
+
                 if on_top and on_left: return True, HTTOPLEFT
                 if on_top and on_right: return True, HTTOPRIGHT
                 if on_bottom and on_left: return True, HTBOTTOMLEFT
@@ -1407,7 +1447,7 @@ class WingosyMainWindow(QMainWindow):
                 if on_bottom: return True, HTBOTTOM
                 if on_left: return True, HTLEFT
                 if on_right: return True, HTRIGHT
-            
+
             # Title bar area hit testing
             title_height = int(40 * scale)
             if dist_top <= title_height:
@@ -1420,9 +1460,9 @@ class WingosyMainWindow(QMainWindow):
                     # Fallback
                     if (x - rect.left) < (rect.right - rect.left) * 0.4:
                         return True, 2 # HTCAPTION
-                
+
                 return True, 1 # HTCLIENT
-            
+
             return True, 1 # HTCLIENT
         
         return super().nativeEvent(eventType, message)
