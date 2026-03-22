@@ -92,6 +92,7 @@ class ImageFetcher(QThread):
         self.url = url
     def run(self):
         try:
+            log = logging.getLogger("wingosy.cover")
             if self.isInterruptionRequested():
                 self.finished.emit(self.game_id, QImage(), b"", "", False)
                 return
@@ -132,7 +133,7 @@ class ImageFetcher(QThread):
                     ImageFetcher._session = session
                 r = session.get(self.url, timeout=15, verify=verify)
                 if r.status_code != 200:
-                    self.finished.emit(self.game_id, QImage())
+                    self.finished.emit(self.game_id, QImage(), b"", "", False)
                     return
                 data = r.content
                 if cache_path is not None and data:
@@ -150,12 +151,24 @@ class ImageFetcher(QThread):
                     except Exception:
                         pass
 
+            try:
+                log.debug(
+                    "[cover] game_id=%s bytes=%s from_cache=%s url=%s",
+                    self.game_id,
+                    len(data) if data else 0,
+                    loaded_from_cache,
+                    self.url,
+                )
+            except Exception:
+                pass
+
             if self.isInterruptionRequested():
                 self.finished.emit(self.game_id, QImage(), b"", "", False)
                 return
 
             fmt = ""
             is_animated = False
+            is_apng = False
             try:
                 try:
                     logging.getLogger("PIL").setLevel(logging.WARNING)
@@ -167,9 +180,30 @@ class ImageFetcher(QThread):
                 im = Image.open(BytesIO(data))
                 fmt = (im.format or "").lower()
                 is_animated = bool(getattr(im, "is_animated", False) and getattr(im, "n_frames", 1) > 1)
+                if fmt == "png" and data and is_animated:
+                    # APNG files commonly keep a .png extension; detect via animation control chunk.
+                    is_apng = b"acTL" in data
+                    if is_apng:
+                        fmt = "apng"
+                try:
+                    log.debug(
+                        "[cover] game_id=%s detected fmt=%s animated=%s apng=%s frames=%s",
+                        self.game_id,
+                        fmt,
+                        is_animated,
+                        is_apng,
+                        getattr(im, "n_frames", "?"),
+                    )
+                except Exception:
+                    pass
             except Exception:
                 fmt = ""
                 is_animated = False
+                is_apng = False
+                try:
+                    log.exception("[cover] game_id=%s pillow detection failed", self.game_id)
+                except Exception:
+                    pass
 
             img = QImage()
             img_ok = False
@@ -177,6 +211,17 @@ class ImageFetcher(QThread):
                 img_ok = bool(img.loadFromData(data))
             except Exception:
                 img_ok = False
+
+            try:
+                log.debug(
+                    "[cover] game_id=%s qimage_loaded=%s animated=%s emit_fmt=%s",
+                    self.game_id,
+                    img_ok,
+                    is_animated,
+                    fmt,
+                )
+            except Exception:
+                pass
 
             if is_animated:
                 # Provide the first frame (when Qt can decode it) plus the raw bytes for QMovie.
@@ -192,6 +237,10 @@ class ImageFetcher(QThread):
                         pass
                 self.finished.emit(self.game_id, QImage(), b"", fmt, False)
         except Exception:
+            try:
+                logging.getLogger("wingosy.cover").exception("[cover] game_id=%s image fetch failed", self.game_id)
+            except Exception:
+                pass
             try:
                 self.finished.emit(self.game_id, QImage(), b"", "", False)
             except Exception:

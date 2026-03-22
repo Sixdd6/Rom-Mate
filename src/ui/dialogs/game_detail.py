@@ -4,11 +4,12 @@ import subprocess
 import logging
 import zipfile
 import time
+from urllib.parse import urlparse
 from pathlib import Path
 import json
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QScrollArea, QFileDialog, QApplication, QDialog, QSizePolicy, QFrame)
 from PySide6.QtCore import Qt, QTimer, Signal, QThread, QPoint, QBuffer, QByteArray, QIODevice
-from PySide6.QtGui import QPixmap, QColor, QMovie, QPainter
+from PySide6.QtGui import QPixmap, QColor, QMovie, QPainter, QImage
 from PySide6.QtSvg import QSvgRenderer
 
 from src.ui.dialogs.styled_messagebox import StyledMessageBox
@@ -531,6 +532,11 @@ class GameDetailPanel(QWidget):
         self._cover_full_pixmap = None
         self._cover_movie = None
         self._cover_movie_buffer = None
+        self._cover_anim_timer = None
+        self._cover_anim_frames = []
+        self._cover_anim_durations = []
+        self._cover_anim_index = 0
+        self._cover_movie_last_frame = -1
         self._start_image_fetch()
         self._start_metadata_fetch()
 
@@ -651,6 +657,7 @@ class GameDetailPanel(QWidget):
         if hasattr(self, '_flush_timer') and self._flush_timer.isActive():
             self._flush_timer.stop()
         try:
+            self._stop_cover_animation_timer()
             mv = getattr(self, "_cover_movie", None)
             if mv is not None:
                 try:
@@ -908,10 +915,39 @@ class GameDetailPanel(QWidget):
     def _start_image_fetch(self):
         url = self.client.get_cover_url(self.game)
         if url:
+            try:
+                logging.getLogger("wingosy.cover").debug(
+                    "[cover] detail start game_id=%s url=%s",
+                    self.game.get('id'),
+                    url,
+                )
+            except Exception:
+                pass
             self.it = ImageFetcher(self.game['id'], url)
             def _safe_set_pixmap(g, img, _raw=b"", _fmt="", _is_animated=False):
                 try:
+                    try:
+                        logging.getLogger("wingosy.cover").debug(
+                            "[cover] detail callback expected_game_id=%s signal_game_id=%s animated=%s fmt=%s raw_bytes=%s image_null=%s",
+                            self.game.get('id'),
+                            g,
+                            _is_animated,
+                            _fmt,
+                            len(_raw) if _raw else 0,
+                            bool(img.isNull()) if img is not None else True,
+                        )
+                    except Exception:
+                        pass
+
                     if _is_animated and _raw:
+                        try:
+                            logging.getLogger("wingosy.cover").debug(
+                                "[cover] detail using movie path game_id=%s fmt=%s",
+                                self.game.get('id'),
+                                _fmt,
+                            )
+                        except Exception:
+                            pass
                         self._set_cover_movie(_raw, _fmt)
                         return
 
@@ -923,6 +959,14 @@ class GameDetailPanel(QWidget):
                         pixmap = None
 
                     if pixmap and not pixmap.isNull():
+                        self._stop_cover_animation_timer()
+                        try:
+                            logging.getLogger("wingosy.cover").debug(
+                                "[cover] detail using static pixmap path game_id=%s",
+                                self.game.get('id'),
+                            )
+                        except Exception:
+                            pass
                         try:
                             mv = getattr(self, "_cover_movie", None)
                             if mv is not None:
@@ -946,6 +990,8 @@ class GameDetailPanel(QWidget):
 
     def _set_cover_movie(self, raw, fmt=""):
         try:
+            log = logging.getLogger("wingosy.cover")
+            self._stop_cover_animation_timer()
             try:
                 if self._cover_movie is not None:
                     self._cover_movie.stop()
@@ -958,11 +1004,40 @@ class GameDetailPanel(QWidget):
             buf.open(QIODevice.ReadOnly)
 
             mv = QMovie(buf)
+            requested_fmt = ""
             if fmt:
                 try:
-                    mv.setFormat(str(fmt).lower().encode("ascii", errors="ignore"))
+                    requested_fmt = str(fmt).lower()
+                    mv.setFormat(requested_fmt.encode("ascii", errors="ignore"))
                 except Exception:
                     pass
+
+            try:
+                log.debug(
+                    "[cover] movie init bytes=%s requested_fmt=%s valid_after_hint=%s",
+                    len(raw) if raw else 0,
+                    requested_fmt,
+                    mv.isValid(),
+                )
+            except Exception:
+                pass
+
+            try:
+                if requested_fmt and not mv.isValid():
+                    mv = QMovie(buf)
+                    try:
+                        log.debug("[cover] movie fallback auto-detect valid=%s", mv.isValid())
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            try:
+                if not mv.isValid():
+                    self._render_placeholder()
+                    return
+            except Exception:
+                pass
 
             try:
                 mv.setCacheMode(QMovie.CacheNone)
@@ -977,15 +1052,180 @@ class GameDetailPanel(QWidget):
             self._cover_movie = mv
             self._cover_movie_buffer = buf
             self._cover_full_pixmap = None
+            self._cover_movie_last_frame = -1
             self.img_label.setMovie(mv)
+            try:
+                mv.frameChanged.connect(self._on_cover_movie_frame_changed)
+            except Exception:
+                pass
             mv.start()
+            try:
+                log.debug("[cover] movie started state=%s frame_count=%s", mv.state(), mv.frameCount())
+            except Exception:
+                pass
+            try:
+                QTimer.singleShot(900, lambda: self._fallback_cover_movie_if_stalled(raw, fmt))
+            except Exception:
+                pass
         except Exception:
+            try:
+                logging.getLogger("wingosy.cover").exception("[cover] movie setup failed")
+            except Exception:
+                pass
             self._render_placeholder()
+
+    def _on_cover_movie_frame_changed(self, frame_index):
+        try:
+            self._cover_movie_last_frame = int(frame_index)
+        except Exception:
+            self._cover_movie_last_frame = frame_index
+
+    def _fallback_cover_movie_if_stalled(self, raw, fmt=""):
+        try:
+            log = logging.getLogger("wingosy.cover")
+            mv = getattr(self, "_cover_movie", None)
+            if mv is None:
+                return
+            if mv.state() != QMovie.Running:
+                return
+            if int(getattr(self, "_cover_movie_last_frame", -1)) > 0:
+                return
+            log.debug(
+                "[cover] movie stalled, switching to pillow animation fmt=%s",
+                fmt,
+            )
+            try:
+                mv.stop()
+            except Exception:
+                pass
+            self._cover_movie = None
+            self._cover_movie_buffer = None
+            self.img_label.setMovie(None)
+
+            started = self._start_cover_pillow_animation(raw)
+            try:
+                log.debug("[cover] pillow fallback started=%s", started)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _stop_cover_animation_timer(self):
+        try:
+            t = getattr(self, "_cover_anim_timer", None)
+            if t is not None:
+                t.stop()
+                t.deleteLater()
+        except Exception:
+            pass
+        self._cover_anim_timer = None
+        self._cover_anim_frames = []
+        self._cover_anim_durations = []
+        self._cover_anim_index = 0
+
+    def _start_cover_pillow_animation(self, raw):
+        try:
+            from io import BytesIO
+            from PIL import Image
+        except Exception:
+            return False
+
+        try:
+            im = Image.open(BytesIO(raw))
+            if not bool(getattr(im, "is_animated", False) and getattr(im, "n_frames", 1) > 1):
+                return False
+
+            frames = []
+            durations = []
+            n_frames = int(getattr(im, "n_frames", 1))
+            for i in range(n_frames):
+                try:
+                    im.seek(i)
+                except Exception:
+                    break
+                rgba = im.convert("RGBA")
+                w, h = rgba.size
+                b = rgba.tobytes("raw", "RGBA")
+                qimg = QImage(b, w, h, w * 4, QImage.Format_RGBA8888).copy()
+                pm = QPixmap.fromImage(qimg)
+                if pm.isNull():
+                    continue
+                dur = int(im.info.get("duration", 100) or 100)
+                if dur < 20:
+                    dur = 20
+                frames.append(pm)
+                durations.append(dur)
+
+            if len(frames) < 2:
+                try:
+                    logging.getLogger("wingosy.cover").debug(
+                        "[cover] pillow animation rejected frames=%s",
+                        len(frames),
+                    )
+                except Exception:
+                    pass
+                return False
+
+            self._cover_anim_frames = frames
+            self._cover_anim_durations = durations
+            self._cover_anim_index = 0
+
+            timer = QTimer(self)
+            timer.timeout.connect(self._advance_cover_pillow_frame)
+            self._cover_anim_timer = timer
+            self._advance_cover_pillow_frame()
+            try:
+                logging.getLogger("wingosy.cover").debug(
+                    "[cover] pillow animation ready frames=%s first_delay_ms=%s",
+                    len(frames),
+                    durations[0] if durations else 100,
+                )
+            except Exception:
+                pass
+            return True
+        except Exception:
+            try:
+                logging.getLogger("wingosy.cover").exception("[cover] pillow animation setup failed")
+            except Exception:
+                pass
+            return False
+
+    def _advance_cover_pillow_frame(self):
+        try:
+            frames = getattr(self, "_cover_anim_frames", None) or []
+            if not frames:
+                return
+            idx = int(getattr(self, "_cover_anim_index", 0)) % len(frames)
+            pm = frames[idx]
+            w = self.img_label.width()
+            h = self.img_label.height()
+            if w > 0 and h > 0:
+                self.img_label.setPixmap(pm.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+            else:
+                self.img_label.setPixmap(pm)
+            self._cover_anim_index = (idx + 1) % len(frames)
+            durations = getattr(self, "_cover_anim_durations", None) or [100]
+            next_ms = durations[idx] if idx < len(durations) else 100
+            t = getattr(self, "_cover_anim_timer", None)
+            if t is not None:
+                t.start(max(20, int(next_ms)))
+        except Exception:
+            return
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_cover_pixmap()
         self._update_screenshot_pixmaps()
+        try:
+            if getattr(self, "_cover_movie", None) is None and getattr(self, "_cover_anim_frames", None):
+                idx = (int(getattr(self, "_cover_anim_index", 0)) - 1) % len(self._cover_anim_frames)
+                pm = self._cover_anim_frames[idx]
+                w = self.img_label.width()
+                h = self.img_label.height()
+                if w > 0 and h > 0:
+                    self.img_label.setPixmap(pm.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+        except Exception:
+            pass
         try:
             mv = getattr(self, "_cover_movie", None)
             if mv is not None:
@@ -1153,18 +1393,52 @@ class GameDetailPanel(QWidget):
         # Cover URL fallback: LaunchBox provides a list of images
         cover_url = None
         screenshot_urls = []
+
+        def _add_screenshot_candidate(value):
+            if isinstance(value, str) and value.strip():
+                screenshot_urls.append(value.strip())
+
+        def _collect_from_image_list(items):
+            if not isinstance(items, list):
+                return
+            for i in items:
+                if isinstance(i, str):
+                    _add_screenshot_candidate(i)
+                    continue
+                if not isinstance(i, dict):
+                    continue
+                t = str(i.get("type") or i.get("kind") or i.get("category") or "").lower()
+                u = (
+                    i.get("url") or i.get("image") or i.get("image_url") or
+                    i.get("screenshot") or i.get("screenshot_url")
+                )
+                if not isinstance(u, str) or not u.strip():
+                    continue
+                if "screenshot" in t or "screen" in t or (not t and "screenshot" in u.lower()):
+                    _add_screenshot_candidate(u)
+
+        def _collect_from_mapping(obj):
+            if not isinstance(obj, dict):
+                return
+            for k, v in obj.items():
+                key = str(k or "").lower()
+                if "screenshot" in key:
+                    if isinstance(v, str):
+                        _add_screenshot_candidate(v)
+                    elif isinstance(v, list):
+                        _collect_from_image_list(v)
+                    elif isinstance(v, dict):
+                        _collect_from_mapping(v)
+                elif key in ("images", "media", "artwork", "assets", "gallery"):
+                    if isinstance(v, list):
+                        _collect_from_image_list(v)
+                    elif isinstance(v, dict):
+                        _collect_from_mapping(v)
+
         try:
             imgs = md.get("images") or rom.get("images")
             if isinstance(imgs, list):
-                for i in imgs:
-                    if not isinstance(i, dict):
-                        continue
-                    t = str(i.get("type") or "")
-                    u = i.get("url")
-                    if not u:
-                        continue
-                    if "screenshot" in t.lower():
-                        screenshot_urls.append(u)
+                _collect_from_image_list(imgs)
 
                 preferred_types = [
                     "Box - Front",
@@ -1183,6 +1457,24 @@ class GameDetailPanel(QWidget):
                     best = next((i for i in imgs if isinstance(i, dict) and i.get("url")), None)
                 if best:
                     cover_url = best.get("url")
+
+            candidate_sources = [
+                rom,
+                md,
+                rom.get("igdb_metadata"),
+                rom.get("moby_metadata"),
+                rom.get("ss_metadata"),
+                rom.get("launchbox_metadata"),
+                rom.get("launchbox"),
+                rom.get("lb_metadata"),
+                rom.get("lb"),
+                rom.get("launchbox_game"),
+                rom.get("windows_metadata"),
+                rom.get("windows_game"),
+                rom.get("windows"),
+            ]
+            for src in candidate_sources:
+                _collect_from_mapping(src)
         except Exception:
             cover_url = None
 
@@ -1316,9 +1608,33 @@ class GameDetailPanel(QWidget):
 
         cleaned = []
         try:
+            host = str(getattr(self.client, "host", "") or "").strip().rstrip("/")
+            seen = set()
             for u in (urls or []):
-                if isinstance(u, str) and u.strip():
-                    cleaned.append(u.strip())
+                if not isinstance(u, str):
+                    continue
+                s = u.strip()
+                if not s:
+                    continue
+
+                if s.startswith("//"):
+                    s = f"https:{s}"
+                elif s.startswith("/"):
+                    if not host:
+                        continue
+                    s = f"{host}{s}"
+
+                parsed = urlparse(s)
+                if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                    continue
+                if any(ch in s for ch in ("\n", "\r", "\t", " ")):
+                    continue
+
+                key = s.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                cleaned.append(s)
         except Exception:
             cleaned = []
 
