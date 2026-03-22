@@ -66,7 +66,7 @@ EMULATOR_SOURCES = {
     },
     "melonds": {
         "type": "direct",
-        "label": "melonDS",
+        "label": "MelonDS",
         "url": "https://github.com/melonDS-emu/melonDS/releases/latest",
         "exe_hint": "melonDS.exe"
     },
@@ -78,8 +78,14 @@ EMULATOR_SOURCES = {
     },
     "redream": {
         "type": "direct",
-        "label": "ReDream",
+        "label": "reDream",
         "url": "https://redream.io/download",
         "exe_hint": "redream.exe"
+    },
+    "PPSSPP": {
+        "type": "direct",
+        "label": "PPSSPP",
+        "url": "https://www.ppsspp.org/download/",
+        "exe_hint": "PPSSPPWindows64.exe"
     }
 }

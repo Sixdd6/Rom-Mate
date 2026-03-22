@@ -652,23 +652,105 @@ class WingosyMainWindow(QMainWindow):
         if not emu_data: return
         
         emu_id = emu_data.get("id", "").lower()
-        
-        EMULATOR_BIOS_PLATFORMS = {
-            "eden":       ["switch", "nintendo-switch"],
-            "rpcs3":      ["ps3", "playstation-3", "playstation3"],
-            "pcsx2":      ["ps2", "playstation-2", "playstation2"],
-            "duckstation":["ps", "psx", "playstation", "playstation-1"],
-            "retroarch":  None,  # None = show ALL platforms (RetroArch supports everything)
-            "dolphin":    ["gc", "ngc", "gamecube", "nintendo-gamecube", "wii", "nintendo-wii"],
-            "cemu":       ["wiiu", "wii-u", "nintendo-wii-u"],
-            "azahar":     ["n3ds", "3ds", "nintendo-3ds", "new-nintendo-3ds"],
-            "melonds":    ["nds", "nintendo-ds"],
-            "xemu":       ["xbox"],
-            "xenia":      [],  # Xbox 360 has no BIOS files needed
-            "xenia_canary": [],
-        }
 
-        allowed_platforms = EMULATOR_BIOS_PLATFORMS.get(emu_id, None)
+        NO_BIOS_EMULATOR_IDS = {"xenia", "xenia_canary"}
+        if emu_id in NO_BIOS_EMULATOR_IDS:
+            allowed_platforms = []
+        else:
+            assignments = self.config.get("platform_assignments", {}) or {}
+
+            configured_platforms = {
+                str(s).strip().lower()
+                for s in emu_data.get("platform_slugs", [])
+                if str(s).strip()
+            }
+            configured_platforms.discard("multi")
+
+            # If a platform is explicitly assigned to another emulator,
+            # exclude it from this emulator's firmware scope.
+            for slug, assigned_emu_id in assignments.items():
+                slug_norm = str(slug).strip().lower()
+                if not slug_norm:
+                    continue
+                assigned_norm = str(assigned_emu_id).strip().lower()
+                if assigned_norm and assigned_norm != emu_id:
+                    configured_platforms.discard(slug_norm)
+
+            # Always include platforms explicitly assigned to this emulator.
+            for slug, assigned_emu_id in assignments.items():
+                if str(assigned_emu_id).strip().lower() == emu_id:
+                    norm_slug = str(slug).strip().lower()
+                    if norm_slug:
+                        configured_platforms.add(norm_slug)
+
+            allowed_platforms = sorted(configured_platforms)
+
+        def _norm_slug(slug):
+            s = str(slug or "").strip().lower().replace("_", "-")
+            if not s:
+                return ""
+            parts = [p for p in s.split("-") if p]
+            vendor_prefixes = {"nintendo", "sega", "sony", "microsoft", "snk", "atari"}
+            while parts and parts[0] in vendor_prefixes:
+                parts = parts[1:]
+            return "-".join(parts)
+
+        games = getattr(self, "all_games", []) or []
+        platform_ids_by_slug = {}
+        platform_names_by_id = {}
+        for g in games:
+            try:
+                pid = g.get("platform_id")
+                if pid is None:
+                    continue
+                pid = int(pid)
+            except Exception:
+                continue
+
+            pname = g.get("platform_display_name") or g.get("platform_custom_name") or g.get("platform_slug") or f"Platform {pid}"
+            platform_names_by_id[pid] = pname
+
+            slug_candidates = {
+                str(g.get("platform_slug") or "").strip().lower(),
+                str(g.get("platform_fs_slug") or "").strip().lower(),
+            }
+            for cand in list(slug_candidates):
+                if cand:
+                    slug_candidates.add(_norm_slug(cand))
+
+            for slug in slug_candidates:
+                if not slug:
+                    continue
+                platform_ids_by_slug.setdefault(slug, set()).add(pid)
+
+        selected_platform_ids = set()
+        for allowed in allowed_platforms:
+            norm_allowed = _norm_slug(allowed)
+            selected_platform_ids.update(platform_ids_by_slug.get(allowed, set()))
+            if norm_allowed:
+                selected_platform_ids.update(platform_ids_by_slug.get(norm_allowed, set()))
+
+        # Exclude platform IDs explicitly assigned to other emulators,
+        # regardless of slug alias variants.
+        blocked_platform_ids = set()
+        assignments = self.config.get("platform_assignments", {}) or {}
+        for slug, assigned_emu_id in assignments.items():
+            assigned_norm = str(assigned_emu_id).strip().lower()
+            if not assigned_norm or assigned_norm == emu_id:
+                continue
+
+            slug_raw = str(slug).strip().lower()
+            if not slug_raw:
+                continue
+
+            slug_norm = _norm_slug(slug_raw)
+            blocked_platform_ids.update(platform_ids_by_slug.get(slug_raw, set()))
+            if slug_norm:
+                blocked_platform_ids.update(platform_ids_by_slug.get(slug_norm, set()))
+
+        selected_platform_ids.difference_update(blocked_platform_ids)
+
+        selected_platform_ids = sorted(selected_platform_ids)
 
         dialog = QDialog(self)
         dialog.setWindowTitle(f"RomM BIOS Manager — {emu_name}")
@@ -688,16 +770,7 @@ class WingosyMainWindow(QMainWindow):
                 item = list_layout.itemAt(i)
                 if item and item.widget():
                     item.widget().setParent(None)
-            
-            # Re-fetch from API
-            firmwares = self.client.get_firmware()
-            
-            # Filtering constants
-            NO_BIOS_PLATFORMS = {
-                "windows", "win", "pc", "pc-windows", "dos", "win95", "win98",
-                "xbox360", "xbla", "xbox-360",
-                "android", "ios", "mac", "linux"
-            }
+
             GAME_ROM_EXTENSIONS = {
                 '.cia', '.nsp', '.xci',           # Switch/3DS installable games
                 '.z64', '.n64', '.v64',           # N64 ROMs  
@@ -718,32 +791,50 @@ class WingosyMainWindow(QMainWindow):
                 list_layout.addWidget(msg)
                 return
 
+            if not allowed_platforms:
+                msg = QLabel(
+                    f"No firmware platforms are configured for {emu_name}.\n"
+                    "Assign platforms to this emulator in Emulators > Platforms."
+                )
+                msg.setAlignment(Qt.AlignCenter)
+                msg.setStyleSheet("color: #aaa; margin: 40px; font-size: 14px;")
+                list_layout.addWidget(msg)
+                return
+
+            if not selected_platform_ids:
+                msg = QLabel(
+                    f"No mapped platform IDs found for {emu_name}.\n"
+                    "This firmware view now queries RomM by platform_id."
+                )
+                msg.setAlignment(Qt.AlignCenter)
+                msg.setWordWrap(True)
+                msg.setStyleSheet("color: #aaa; margin: 40px; font-size: 13px; line-height: 1.5;")
+                list_layout.addWidget(msg)
+                return
+
+            firmwares = []
+            per_platform_counts = {}
+            for pid in selected_platform_ids:
+                files = self.client.get_firmware(platform_id=pid) or []
+                per_platform_counts[pid] = len(files)
+                pname = platform_names_by_id.get(pid, f"Platform {pid}")
+                for fw in files:
+                    if isinstance(fw, dict):
+                        fw["platform_id"] = pid
+                        fw["platform_display_name"] = fw.get("platform_display_name") or pname
+                    firmwares.append(fw)
+
             platforms_map = {}
             # Debug tracking
             stats = {
                 "total_firmware_items": len(firmwares),
-                "platforms_with_firmware": set(),
-                "skipped_no_bios_platform": 0,
                 "skipped_game_extension": 0,
-                "skipped_not_for_emu": 0,
                 "skipped_blocklist": 0,
-                "skipped_pattern_mismatch": 0
+                "skipped_pattern_mismatch": 0,
             }
 
             for fw in firmwares:
-                p_slug = str(fw.get('platform_slug', '')).lower()
                 p_name = fw.get('platform_name') or fw.get('platform_display_name') or 'Other'
-                stats["platforms_with_firmware"].add(p_slug)
-                
-                # Filter A: Exclude non-BIOS platforms
-                if p_slug in NO_BIOS_PLATFORMS:
-                    stats["skipped_no_bios_platform"] += 1
-                    continue
-
-                # Filter B: Emulator specific platform filtering
-                if allowed_platforms is not None and p_slug not in allowed_platforms:
-                    stats["skipped_not_for_emu"] += 1
-                    continue
 
                 f_name = fw.get('file_name', 'unknown')
                 f_name_lower = f_name.lower()
@@ -757,7 +848,8 @@ class WingosyMainWindow(QMainWindow):
                     continue
 
                 # Filter D: Pattern mismatch (scph* belongs to PlayStation)
-                if f_name_lower.startswith("scph") and "playstation" not in p_slug and "ps" not in p_slug:
+                lookup_slug = str(fw.get('platform_slug') or '').strip().lower()
+                if f_name_lower.startswith("scph") and "playstation" not in lookup_slug and "ps" not in lookup_slug:
                     stats["skipped_pattern_mismatch"] += 1
                     continue
 
@@ -772,14 +864,15 @@ class WingosyMainWindow(QMainWindow):
             if not platforms_map:
                 debug_info = (
                     f"DEBUG INFO:\n"
-                    f"- Total items from API: {stats['total_firmware_items']}\n"
-                    f"- Skipped (Non-BIOS platform): {stats['skipped_no_bios_platform']}\n"
-                    f"- Skipped (Not for this emulator): {stats['skipped_not_for_emu']}\n"
-                    f"- Skipped (Blocklist): {stats['skipped_blocklist']}\n"
-                    f"- Skipped (Pattern mismatch): {stats['skipped_pattern_mismatch']}\n"
-                    f"- Skipped (Game ROM >16MB): {stats['skipped_game_extension']}"
+                    f"Total firmware files from server: {stats['total_firmware_items']}\n"
+                    f"Allowed emulator platforms (slugs): {', '.join(allowed_platforms) or '(none)'}\n"
+                    f"Resolved platform IDs: {', '.join(map(str, selected_platform_ids)) or '(none)'}\n"
+                    f"Firmware count by platform_id: {per_platform_counts}\n"
+                    f"Skipped (blocklisted names): {stats['skipped_blocklist']}\n"
+                    f"Skipped (pattern mismatch): {stats['skipped_pattern_mismatch']}\n"
+                    f"Skipped (likely game ROMs): {stats['skipped_game_extension']}\n"
+                    f"\nNo BIOS files matched this emulator."
                 )
-                
                 msg = QLabel(f"No BIOS files found for this emulator on your RomM server.\n\n{debug_info}")
                 msg.setAlignment(Qt.AlignCenter)
                 msg.setWordWrap(True)
@@ -850,16 +943,30 @@ class WingosyMainWindow(QMainWindow):
         dialog.exec()
 
     def dl_fw_list(self, emu_name, fw_list, dialog):
+        if not fw_list:
+            return
+
+        platform_label = fw_list[0].get('platform_name') or fw_list[0].get('platform_display_name') or 'selected platform'
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            f"Select BIOS directory for {platform_label}",
+            str(Path.home())
+        )
+        if not folder:
+            return
+
+        target_dir = Path(folder)
         count = 0
         for fw in fw_list:
-            if self.start_fw_download(emu_name, fw): count += 1
+            if self.start_fw_download(emu_name, fw, destination_dir=target_dir):
+                count += 1
         self.log(f"✨ BIOS Sync: {count} downloads started.")
-        dialog.accept()
 
     def dl_fw(self, emu_name, fw, dialog):
-        if self.start_fw_download(emu_name, fw): dialog.accept()
+        if self.start_fw_download(emu_name, fw):
+            dialog.accept()
 
-    def start_fw_download(self, emu_name, fw):
+    def start_fw_download(self, emu_name, fw, destination_dir=None):
         try:
             all_emus = emulators.load_emulators()
             emu_data = next((e for e in all_emus if e["name"] == emu_name), None)
@@ -902,7 +1009,7 @@ class WingosyMainWindow(QMainWindow):
                     if d: return d
                 return None
 
-            suggested = get_bios_dest(emu_id, emu_path)
+            suggested = Path(destination_dir) if destination_dir else get_bios_dest(emu_id, emu_path)
             
             if not suggested:
                 # Fallback: prompt user to pick a folder

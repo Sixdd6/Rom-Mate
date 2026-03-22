@@ -131,7 +131,11 @@ class RomMClient:
             if self.host.startswith("http://"):
                 print("[API] Warning: Credentials being sent over unencrypted HTTP connection.")
             
-            scope = "me.read me.write platforms.read roms.read assets.read assets.write roms.user.read roms.user.write collections.read collections.write"
+            scope = (
+                "me.read me.write platforms.read roms.read "
+                "assets.read assets.write firmware.read firmware.write "
+                "roms.user.read roms.user.write collections.read collections.write"
+            )
             data = {
                 "grant_type": "password",
                 "username": username,
@@ -797,13 +801,15 @@ class RomMClient:
             print(f"[API] upload_state error: {e}")
             return False, str(e)
 
-    def get_firmware(self):
+    def get_firmware(self, platform_id=None):
         """
         Fetch BIOS/firmware files from RomM's dedicated firmware endpoint.
         """
         try:
             url = f"{self.host}/api/firmware"
             params = {"limit": 100, "offset": 0}
+            if platform_id is not None:
+                params["platform_id"] = int(platform_id)
             firmware_list = []
 
             while True:
@@ -845,11 +851,11 @@ class RomMClient:
             print(f"[API] Error getting firmware: {e}")
             return []
 
-    def get_bios_files(self):
+    def get_bios_files(self, platform_id=None):
         """
         Alias for get_firmware using the correct RomM dedicated endpoint.
         """
-        return self.get_firmware()
+        return self.get_firmware(platform_id=platform_id)
 
     def download_firmware(self, fw_item, target_path, progress_cb=None, thread=None):
         try:

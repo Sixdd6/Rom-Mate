@@ -688,6 +688,10 @@ _EMU_SAVE_HINTS: dict[str, list] = {
         lambda e: Path(e).parent,
         lambda _: Path(os.path.expandvars(r'%APPDATA%\redream')),
     ],
+    "ppsspp": [
+        lambda e: Path(e).parent / "memstick" / "PSP" / "SAVEDATA",
+        lambda _: Path(os.path.expandvars(r'%USERPROFILE%\Documents\PPSSPP\PSP\SAVEDATA')),
+    ],
     # xemu saves are stored inside xbox_hdd.qcow2 virtual disk image
     # and cannot be synced as regular files. Save sync not supported.
 }

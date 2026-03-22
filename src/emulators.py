@@ -15,7 +15,14 @@ DEFAULT_EMULATORS = [
         "name": "Multi-Console (RetroArch)",
         "executable_path": "",
         "launch_args": ["-L", "{core_path}", "{rom_path}"],
-        "platform_slugs": _unique_list(["multi"] + RETROARCH_PLATFORMS),
+        "platform_slugs": ["dc", "dreamcast", "segacd", "sega-cd","megacd", "sega-megacd", "32x", "sega-32x",
+                         "saturn", "sega-saturn", "psx", "ps1", "playstation", "ps2", "playstation2",
+                         "psp", "playstation-portable", "snes", "super-nintendo", "sega-genesis", "sega-megadrive",
+                         "n64", "nintendo-64", "nds", "nintendo-ds", "gba", "gameboy-advance", "gb", "gameboy",
+                         "ngp", "neo-geo-pocket", "ngpc", "neo-geo-pocket-color",
+                         "pce", "pcengine", "tg16", "pc-engine-turboGrafx-16", "pcenginecd", "arcade", "mame",
+                         "dos", "pc-dos", "gamecube", "nintendo-gamecube", "nes", "famicom", "gbc", "gameboy-color",
+                         "sms", "sega-master-system", "gg", "game-gear", "virtualboy", "vboy", "wii", "nintendo-wii"],
         "save_resolution": {
             "mode": "retroarch",
             "srm_dir": "",
@@ -41,7 +48,7 @@ DEFAULT_EMULATORS = [
     },
     {
         "id": "rpcs3",
-        "name": "PlayStation 3",
+        "name": "PlayStation 3 (RPCS3)",
         "executable_path": "",
         "launch_args": ["{rom_path}"],
         "platform_slugs": ["ps3", "playstation-3", "playstation3"],
@@ -55,10 +62,10 @@ DEFAULT_EMULATORS = [
     },
     {
         "id": "dolphin",
-        "name": "GameCube / Wii",
+        "name": "GameCube / Wii (Dolphin)",
         "executable_path": "",
         "launch_args": ["{rom_path}"],
-        "platform_slugs": ["gc", "ngc", "wii", "gamecube", "nintendo-gamecube", "nintendo-wii", "wii-u-vc"],
+        "platform_slugs": ["gc", "ngc", "gamecube", "nintendo-gamecube", "wii", "nintendo-wii"],
         "save_resolution": {
             "mode": "dolphin",
             "path": ""
@@ -69,7 +76,7 @@ DEFAULT_EMULATORS = [
     },
     {
         "id": "pcsx2",
-        "name": "PlayStation 2",
+        "name": "PlayStation 2 (PCSX2)",
         "executable_path": "",
         "launch_args": ["{rom_path}"],
         "platform_slugs": ["ps2", "playstation-2", "playstation2"],
@@ -100,7 +107,7 @@ DEFAULT_EMULATORS = [
         "name": "Nintendo 3DS (Azahar)",
         "executable_path": "",
         "launch_args": ["{rom_path}"],
-        "platform_slugs": ["n3ds", "3ds", "nintendo-3ds", "nintendo3ds", "new-nintendo-3ds", "new-nintendo-3ds-xl"],
+        "platform_slugs": ["n3ds", "3ds", "nintendo-3ds", "nintendo3ds"],
         "save_resolution": {
             "mode": "folder",
             "path": ""
@@ -111,7 +118,7 @@ DEFAULT_EMULATORS = [
     },
     {
         "id": "xemu",
-        "name": "Xemu",
+        "name": "Xbox (Xemu)",
         "executable_path": "",
         "launch_args": ["-dvd_path", "{rom_path}"],
         "github": "xemu-project/xemu",
@@ -127,7 +134,7 @@ DEFAULT_EMULATORS = [
     },
     {
         "id": "xenia_canary",
-        "name": "Xenia Canary (Xbox 360)",
+        "name": "Xbox 360 (Xenia Canary)",
         "executable_path": "",
         "launch_args": ["{rom_path}"],
         "platform_slugs": ["xbox360", "xbla"],
@@ -142,7 +149,7 @@ DEFAULT_EMULATORS = [
     },
     {
         "id": "xenia",
-        "name": "Xenia Stable (Xbox 360)",
+        "name": "Xbox 360 (Xenia)",
         "executable_path": "",
         "launch_args": ["{rom_path}"],
         "url": "https://github.com/xenia-project/release-builds-windows/releases/latest/download/xenia_master.zip",
@@ -158,11 +165,11 @@ DEFAULT_EMULATORS = [
     },
     {
         "id": "duckstation",
-        "name": "DuckStation",
+        "name": "Playstation (DuckStation)",
         "executable_path": "",
         "launch_args": ["-batch", "{rom_path}"],
         "github": "stenzek/duckstation",
-        "platform_slugs": ["ps", "playstation", "psx"],
+        "platform_slugs": ["ps1", "psx", "playstation"],
         "save_resolution": {
             "mode": "folder",
             "path": ""
@@ -173,12 +180,26 @@ DEFAULT_EMULATORS = [
         "conflict_behavior": "ask"
     },
     {
+        "id": "ppsspp",
+        "name": "PSP (PPSSPP)",
+        "executable_path": "",
+        "launch_args": ["{rom_path}"],
+        "platform_slugs": ["psp", "playstation-portable"],
+        "save_resolution": {
+            "mode": "folder",
+            "path": ""
+        },
+        "user_defined": False,
+        "sync_enabled": True,
+        "conflict_behavior": "ask"
+    },
+    {
         "id": "melonds",
-        "name": "MelonDS",
+        "name": "Nintendo DS (MelonDS)",
         "executable_path": "",
         "launch_args": ["{rom_path}"],
         "github": "melonDS-emu/melonDS",
-        "platform_slugs": ["nds", "nintendo-ds"],
+        "platform_slugs": ["nds", "nintendo-ds", "nintendods"],
         "save_resolution": {
             "mode": "file",
             "path": ""
@@ -190,7 +211,7 @@ DEFAULT_EMULATORS = [
     },
     {
         "id": "redream",
-        "name": "ReDream",
+        "name": "Sega Dreamcast (reDream)",
         "executable_path": "",
         "launch_args": ["{rom_path}"],
         "platform_slugs": ["dreamcast", "sega-dreamcast", "dc"],
