@@ -1,6 +1,7 @@
 import os
 import shlex
 import subprocess
+import logging
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,   
                              QPushButton, QScrollArea, QFormLayout,
                              QLineEdit, QFileDialog,
@@ -10,6 +11,14 @@ from PySide6.QtCore import Qt
 
 from src import emulators
 from src.ui.dialogs.styled_messagebox import StyledMessageBox
+
+
+def _normalize_launch_args_for_display(raw_args, default="{rom_path}"):
+    if isinstance(raw_args, list):
+        return [str(a) for a in raw_args if a is not None]
+    if isinstance(raw_args, str):
+        return [raw_args]
+    return [default]
 
 
 class EmulatorSettingsDialog(QDialog):
@@ -44,7 +53,7 @@ class EmulatorSettingsDialog(QDialog):
         exe_row.addWidget(self.browse_emulator_btn)
         form.addRow("Executable Path:", exe_row)
 
-        launch_args = " ".join(selected_emu.get("launch_args", ["{rom_path}"])) if selected_emu else "{rom_path}"
+        launch_args = " ".join(_normalize_launch_args_for_display(selected_emu.get("launch_args"))) if selected_emu else "{rom_path}"
         self.args_input = QLineEdit(launch_args)
         self.args_input.setPlaceholderText("{rom_path}")
         form.addRow("Launch Arguments:", self.args_input)
@@ -161,7 +170,7 @@ class EmulatorEditDialog(QDialog):
 
         self.args_input = QLineEdit()
         self.args_input.setPlaceholderText("{rom_path}")
-        if emu_data: self.args_input.setText(" ".join(emu_data.get("launch_args", ["{rom_path}"])))
+        if emu_data: self.args_input.setText(" ".join(_normalize_launch_args_for_display(emu_data.get("launch_args"))))
         form.addRow("Launch Arguments:", self.args_input)
 
         args_helper = QLabel("<small style='color:#888;'>Use {rom_path} for the game file. Example: --fullscreen {rom_path}</small>")
@@ -290,13 +299,20 @@ class EmulatorEditDialog(QDialog):
             "id": emu_id,
             "name": name,
             "executable_path": exe,
-            "launch_args": (shlex.split(self.args_input.text(), posix=False) if self.args_input.text().strip() else []),
+            "launch_args": [],
             "platform_slugs": slugs,
             "save_resolution": save_res,
             "user_defined": True,
             "sync_enabled": True,
             "conflict_behavior": "ask"
         }
+        args_text = self.args_input.text().strip()
+        if args_text:
+            try:
+                new_data["launch_args"] = shlex.split(args_text, posix=False)
+            except ValueError:
+                new_data["launch_args"] = args_text.split()
+
         self.result_data = new_data
         self.accept()
 
@@ -357,9 +373,13 @@ class EmuListWidget(QWidget):
     def open_settings_dialog(self, emu_id):
         dialog = EmulatorSettingsDialog(self.main_window, emu_id, self)
         if dialog.exec() == QDialog.Accepted:
-            self.populate_emus()
-            self.main_window.emulators_tab.refresh_all()
-            self.main_window.library_tab.apply_filters()
+            try:
+                self.populate_emus()
+                self.main_window.emulators_tab.refresh_all()
+                self.main_window.library_tab.apply_filters()
+            except Exception as e:
+                logging.exception("Failed to refresh UI after emulator settings save")
+                StyledMessageBox.warning(self, "Refresh Failed", f"Settings were saved, but the UI refresh encountered an error:\n{e}")
 
     def populate_emus(self):
         for i in reversed(range(self.emu_list_layout.count())):
@@ -413,36 +433,50 @@ class EmuListWidget(QWidget):
     def add_custom_emulator(self):
         dialog = EmulatorEditDialog(parent=self)
         if dialog.exec() == QDialog.Accepted:
-            all_emus = emulators.load_emulators()
-            all_emus.append(dialog.result_data)
-            emulators.save_emulators(all_emus)
-            self.main_window.log(f"✅ Added emulator: {dialog.result_data['name']}")
-            self.populate_emus()
-            self.main_window.emulators_tab.refresh_all()
+            try:
+                all_emus = emulators.load_emulators()
+                all_emus.append(dialog.result_data)
+                emulators.save_emulators(all_emus)
+                self.main_window.log(f"✅ Added emulator: {dialog.result_data['name']}")
+                self.populate_emus()
+                self.main_window.emulators_tab.refresh_all()
+            except Exception as e:
+                logging.exception("Failed to add custom emulator")
+                StyledMessageBox.warning(self, "Add Emulator Failed", f"Could not add custom emulator:\n{e}")
 
     def edit_custom_emulator(self, emu_id):
-        all_emus = emulators.load_emulators()
-        emu_idx = next((i for i, e in enumerate(all_emus) if e["id"] == emu_id), -1)
-        if emu_idx == -1: return
-        dialog = EmulatorEditDialog(emu_data=all_emus[emu_idx], parent=self)
-        if dialog.exec() == QDialog.Accepted:
-            all_emus[emu_idx] = dialog.result_data
-            emulators.save_emulators(all_emus)
-            self.main_window.log(f"✅ Updated emulator: {dialog.result_data['name']}")
-            self.populate_emus()
-            self.main_window.emulators_tab.refresh_all()
+        try:
+            all_emus = emulators.load_emulators()
+            emu_idx = next((i for i, e in enumerate(all_emus) if e["id"] == emu_id), -1)
+            if emu_idx == -1:
+                return
+            dialog = EmulatorEditDialog(emu_data=all_emus[emu_idx], parent=self)
+            if dialog.exec() == QDialog.Accepted:
+                all_emus[emu_idx] = dialog.result_data
+                emulators.save_emulators(all_emus)
+                self.main_window.log(f"✅ Updated emulator: {dialog.result_data['name']}")
+                self.populate_emus()
+                self.main_window.emulators_tab.refresh_all()
+        except Exception as e:
+            logging.exception("Failed to edit custom emulator")
+            StyledMessageBox.warning(self, "Update Emulator Failed", f"Could not update custom emulator:\n{e}")
 
     def remove_emulator(self, emu_id):
-        all_emus = emulators.load_emulators()
-        emu = next((e for e in all_emus if e["id"] == emu_id), None)        
-        if not emu: return
-        reply = StyledMessageBox.question(self, "Remove Emulator", f"Are you sure you want to remove {emu['name']}?", StyledMessageBox.Yes | StyledMessageBox.No)
-        if reply == StyledMessageBox.Yes:
-            all_emus = [e for e in all_emus if e["id"] != emu_id]
-            emulators.save_emulators(all_emus)
-            self.main_window.log(f"🗑 Removed emulator: {emu['name']}")   
-            self.populate_emus()
-            self.main_window.emulators_tab.refresh_all()
+        try:
+            all_emus = emulators.load_emulators()
+            emu = next((e for e in all_emus if e["id"] == emu_id), None)
+            if not emu:
+                return
+            reply = StyledMessageBox.question(self, "Remove Emulator", f"Are you sure you want to remove {emu['name']}?", StyledMessageBox.Yes | StyledMessageBox.No)
+            if reply == StyledMessageBox.Yes:
+                all_emus = [e for e in all_emus if e["id"] != emu_id]
+                emulators.save_emulators(all_emus)
+                self.main_window.log(f"🗑 Removed emulator: {emu['name']}")
+                self.populate_emus()
+                self.main_window.emulators_tab.refresh_all()
+        except Exception as e:
+            logging.exception("Failed to remove custom emulator")
+            StyledMessageBox.warning(self, "Remove Emulator Failed", f"Could not remove emulator:\n{e}")
 
 class PlatformAssignWidget(QWidget):
     def __init__(self, main_window):
