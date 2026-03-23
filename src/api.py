@@ -132,16 +132,10 @@ class RomMClient:
             if self.host.startswith("http://"):
                 print("[API] Warning: Credentials being sent over unencrypted HTTP connection.")
             
-            scope = (
-                "me.read me.write platforms.read roms.read "
-                "assets.read assets.write firmware.read firmware.write "
-                "roms.user.read roms.user.write collections.read collections.write"
-            )
             data = {
                 "grant_type": "password",
                 "username": username,
-                "password": password,
-                "scope": scope
+                "password": password
             }
             try:
                 # Login usually shouldn't be cold-started but we'll use standard timeout
