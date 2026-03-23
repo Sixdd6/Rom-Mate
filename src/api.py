@@ -42,6 +42,7 @@ class RomMClient:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         self.library_cache_path = Path.home() / ".wingosy" / "library_cache.json"
+        self.metadata_dir_path = Path.home() / ".wingosy" / "metadata"
 
     def _load_token(self):
         """Retrieve token via config manager (keyring with encrypted fallback)."""
@@ -283,28 +284,23 @@ class RomMClient:
             if r.status_code == 200:
                 rom_data = r.json()
                 try:
-                    note_meta = None
-                    for note_obj in self.list_notes(str(rom_id)):
-                        parsed = self._parse_wingosy_metadata_note(self._extract_note_text(note_obj))
-                        if parsed is not None:
-                            note_meta = parsed
-                            break
+                    local_meta = self._read_local_wingosy_metadata(rom_id)
 
-                    if note_meta is not None and isinstance(rom_data, dict):
-                        rom_data["wingosy_metadata"] = note_meta
+                    if local_meta is not None and isinstance(rom_data, dict):
+                        rom_data["wingosy_metadata"] = local_meta
 
-                        note_playtime = note_meta.get("playtimeSeconds")
-                        if note_playtime is not None:
+                        local_playtime = local_meta.get("playtimeSeconds")
+                        if local_playtime is not None:
                             try:
-                                note_playtime_int = max(0, int(note_playtime))
+                                local_playtime_int = max(0, int(local_playtime))
                             except Exception:
-                                note_playtime_int = None
-                            if note_playtime_int is not None:
-                                rom_data["playtimeSeconds"] = note_playtime_int
+                                local_playtime_int = None
+                            if local_playtime_int is not None:
+                                rom_data["playtimeSeconds"] = local_playtime_int
 
-                        note_last_played = note_meta.get("lastPlayed")
-                        if isinstance(note_last_played, str) and note_last_played.strip():
-                            rom_data["lastPlayed"] = note_last_played.strip()
+                        local_last_played = local_meta.get("lastPlayed")
+                        if isinstance(local_last_played, str) and local_last_played.strip():
+                            rom_data["lastPlayed"] = local_last_played.strip()
                 except Exception:
                     pass
                 logging.debug(f"ROM detail raw for {rom_id}: {json.dumps(rom_data, indent=2)}")
@@ -374,6 +370,60 @@ class RomMClient:
                 "lastPlayed": str(last_played_iso or ""),
             }
         }
+
+    def _metadata_file_path(self, rom_id):
+        rid = str(rom_id or "").strip()
+        if not rid:
+            return None
+        return self.metadata_dir_path / f"{rid}.json"
+
+    def _read_local_wingosy_metadata(self, rom_id):
+        file_path = self._metadata_file_path(rom_id)
+        if file_path is None or not file_path.exists():
+            return None
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        meta = payload.get("wingosy_metadata") if isinstance(payload.get("wingosy_metadata"), dict) else payload
+        if not isinstance(meta, dict):
+            return None
+
+        playtime_value = meta.get("playtimeSeconds", 0)
+        try:
+            playtime_seconds = max(0, int(playtime_value or 0))
+        except Exception:
+            playtime_seconds = 0
+
+        last_played = meta.get("lastPlayed")
+        if not isinstance(last_played, str):
+            last_played = ""
+
+        return {
+            "playtimeSeconds": playtime_seconds,
+            "lastPlayed": last_played,
+        }
+
+    def _write_local_wingosy_metadata(self, rom_id, playtime_seconds, last_played_iso):
+        file_path = self._metadata_file_path(rom_id)
+        if file_path is None:
+            return False
+
+        payload = self._build_wingosy_metadata_note(playtime_seconds, last_played_iso)
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, separators=(",", ":"))
+            return True
+        except Exception as e:
+            logging.warning(f"[API] Failed writing local metadata for rom_id={rom_id}: {e}")
+            return False
 
     def list_notes(self, rom_id):
         try:
@@ -463,7 +513,6 @@ class RomMClient:
             return False
 
         rid = str(rom_id)
-        headers = self.get_auth_headers()
 
         try:
             if last_played_iso:
@@ -476,12 +525,9 @@ class RomMClient:
         if total_playtime_seconds is None:
             total_playtime = secs
             try:
-                for note_obj in self.list_notes(rid):
-                    note_meta = self._parse_wingosy_metadata_note(self._extract_note_text(note_obj))
-                    if note_meta is None:
-                        continue
-                    total_playtime = max(0, int(note_meta.get("playtimeSeconds") or 0)) + secs
-                    break
+                local_meta = self._read_local_wingosy_metadata(rid)
+                if isinstance(local_meta, dict):
+                    total_playtime = max(0, int(local_meta.get("playtimeSeconds") or 0)) + secs
             except Exception:
                 pass
         else:
@@ -490,16 +536,7 @@ class RomMClient:
             except Exception:
                 total_playtime = secs
 
-        note_ok = False
-        try:
-            note_ok = self._upsert_wingosy_metadata_note(
-                rid,
-                total_playtime,
-                parsed_last_played,
-            )
-        except Exception:
-            note_ok = False
-        return note_ok
+        return self._write_local_wingosy_metadata(rid, total_playtime, parsed_last_played)
 
     def get_cover_url(self, game):
         path = game.get('path_cover_large') or game.get('path_cover_small') 
