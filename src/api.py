@@ -180,6 +180,16 @@ class RomMClient:
             h["Authorization"] = f"Bearer {self.token}"
         return h
 
+    def _normalize_upload_emulator(self, emulator):
+        """
+        Normalize emulator IDs for upload endpoints where some RomM deployments
+        still validate against legacy Switch IDs.
+        """
+        emu = str(emulator or "").strip().lower()
+        if emu in ("eden", "suyu", "switch"):
+            return "yuzu"
+        return emulator
+
     def fetch_library(self, retry_callback=None, page_callback=None):
         """
         Fetch all games from RomM in parallel for speed.
@@ -359,13 +369,12 @@ class RomMClient:
         except Exception:
             playtime_total = 0
 
-        note_payload = {
+        return {
             "wingosy_metadata": {
                 "playtime_seconds": playtime_total,
                 "last-played": str(last_played_iso or ""),
             }
         }
-        return json.dumps(note_payload, separators=(",", ":"))
 
     def list_notes(self, rom_id):
         try:
@@ -394,7 +403,8 @@ class RomMClient:
 
     def _upsert_wingosy_metadata_note(self, rom_id, playtime_seconds, last_played_iso):
         rid = str(rom_id)
-        note_text = self._build_wingosy_metadata_note(playtime_seconds, last_played_iso)
+        note_payload_obj = self._build_wingosy_metadata_note(playtime_seconds, last_played_iso)
+        note_text = json.dumps(note_payload_obj, separators=(",", ":"))
         headers = self.get_auth_headers()
 
         existing_note = None
@@ -404,40 +414,19 @@ class RomMClient:
                 existing_note = note_obj
                 break
 
-        payload_candidates = [
-            {"note": note_text},
-            {"content": note_text},
-            {"text": note_text},
-            {"body": note_text},
-            {"message": note_text},
-        ]
+        payload = {
+            "title": "Wingosy Metadata",
+            "content": note_text,
+            "is_public": False,
+            "tags": ["wingosy", "metadata"],
+        }
 
         note_id = self._extract_note_id(existing_note)
         if note_id is not None:
             note_url = f"{self.host}/api/roms/{rid}/notes/{note_id}"
-            for method in ("patch", "put"):
-                for payload in payload_candidates:
-                    try:
-                        request_fn = getattr(requests, method)
-                        r = request_fn(
-                            note_url,
-                            headers=headers,
-                            json=payload,
-                            timeout=REQUEST_TIMEOUT,
-                            verify=CERTIFI_PATH,
-                        )
-                        if r.status_code in (200, 201, 204):
-                            return True
-                        if r.status_code in (400, 404, 405, 422):
-                            continue
-                    except Exception:
-                        continue
-
-        create_url = f"{self.host}/api/roms/{rid}/notes"
-        for payload in payload_candidates:
             try:
-                r = requests.post(
-                    create_url,
+                r = requests.put(
+                    note_url,
                     headers=headers,
                     json=payload,
                     timeout=REQUEST_TIMEOUT,
@@ -445,11 +434,26 @@ class RomMClient:
                 )
                 if r.status_code in (200, 201, 204):
                     return True
-                if r.status_code in (400, 404, 405, 422):
-                    continue
+                logging.warning(f"[API] Notes update failed ({r.status_code}) for rom_id={rid}: {r.text[:200]}")
+                return False
             except Exception:
-                continue
-        return False
+                return False
+
+        create_url = f"{self.host}/api/roms/{rid}/notes"
+        try:
+            r = requests.post(
+                create_url,
+                headers=headers,
+                json=payload,
+                timeout=REQUEST_TIMEOUT,
+                verify=CERTIFI_PATH,
+            )
+            if r.status_code in (200, 201, 204):
+                return True
+            logging.warning(f"[API] Notes create failed ({r.status_code}) for rom_id={rid}: {r.text[:200]}")
+            return False
+        except Exception:
+            return False
 
     def update_playtime(self, rom_id, seconds, total_playtime_seconds=None, last_played_iso=None):
         try:
@@ -732,7 +736,11 @@ class RomMClient:
     def upload_save(self, rom_id, emulator, file_obj, slot="wingosy-windows", raw=False, filename_override=None):
         try:
             url = f"{self.host}/api/saves"
-            params = {"rom_id": rom_id, "emulator": emulator, "slot": slot}
+            params = {
+                "rom_id": rom_id,
+                "emulator": self._normalize_upload_emulator(emulator),
+                "slot": slot
+            }
             
             # file_obj can be a path string or a file-like object
             if isinstance(file_obj, str):
@@ -785,7 +793,7 @@ class RomMClient:
             url = f"{self.host}/api/states"
             params = {
                 "rom_id": rom_id,
-                "emulator": emulator,
+                "emulator": self._normalize_upload_emulator(emulator),
                 "slot": slot
             }
             

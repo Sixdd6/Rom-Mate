@@ -35,12 +35,14 @@ class PostSessionSyncThread(QThread):
         emu_id = self.data.get('emulator', {}).get('id', 'unknown')
         strategy = self.data.get('strategy')
         rom = self.data.get('game_data')
+        strategy_name = strategy.__class__.__name__ if strategy else "UnknownStrategy"
 
         try:
             logging.info(f"[SyncThread] Starting sync for {title}")
             save_files = strategy.get_save_files(rom)
 
             if not save_files:
+                logging.warning(f"[SyncThread] No save files found for {title} (emu={emu_id}, strategy={strategy_name})")
                 self.log.emit(f"💤 No saves found for {title}, skipping upload")
                 self.done.emit(title, True)
                 return
@@ -350,7 +352,16 @@ class WingosyWatcher(QThread):
             files = strategy.get_save_files(rom)
             logging.debug(f"[Hash] get_save_files returned: {files}")
             if not files:
-                logging.warning(f"[Watcher] No save files found for {rom.get('name')} (emu: {self.active_sessions.get(os.getpid(), {}).get('emulator', {}).get('id', 'unknown') if hasattr(self, 'active_sessions') else 'unknown'})")
+                emu_id = "unknown"
+                strategy_name = strategy.__class__.__name__ if strategy else "UnknownStrategy"
+                try:
+                    for data in self.active_sessions.values():
+                        if data.get('strategy') is strategy:
+                            emu_id = data.get('emulator', {}).get('id', 'unknown')
+                            break
+                except Exception:
+                    pass
+                logging.warning(f"[Watcher] No save files found for {rom.get('name')} (emu={emu_id}, strategy={strategy_name})")
                 return None
             h = hashlib.md5()
             found = False

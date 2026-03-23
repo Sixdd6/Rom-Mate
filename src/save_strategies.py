@@ -333,6 +333,26 @@ class SwitchStrategy(SaveStrategy):
     """
     mode_id = "switch"
 
+    def _iter_title_dirs(self, root: Path):
+        import re
+        save_root = root / "nand/user/save"
+        if not save_root.exists() or not save_root.is_dir():
+            return
+
+        # Layout variants seen across Yuzu/Eden builds:
+        # nand/user/save/<save_namespace>/<profile_id>/<title_id>
+        for namespace_dir in save_root.iterdir():
+            if not namespace_dir.is_dir():
+                continue
+            for profile_dir in namespace_dir.iterdir():
+                if not profile_dir.is_dir():
+                    continue
+                for tid_dir in profile_dir.iterdir():
+                    if not tid_dir.is_dir():
+                        continue
+                    if re.match(r'^01[0-9A-Fa-f]{14}$', tid_dir.name):
+                        yield tid_dir
+
     def _resolve_title_id(self, rom: dict) -> Optional[str]:
         import re
         import sqlite3
@@ -393,33 +413,36 @@ class SwitchStrategy(SaveStrategy):
         # the wrong game when multiple Switch games have saves on disk.
         session_start = getattr(self, 'session_start_time', 0)
         recent_tid, max_mtime = None, 0
+        fallback_tid, fallback_max_mtime = None, 0
+        scanned_dirs = 0
         for root in search_roots:
-            save_base = root / "nand/user/save/0000000000000000"
-            if not save_base.exists():
-                continue
-            for profile_dir in save_base.iterdir():
-                if not profile_dir.is_dir():
-                    continue
-                for tid_dir in profile_dir.iterdir():
-                    if not tid_dir.is_dir():
-                        continue
-                    if not re.match(r'^01[0-9A-Fa-f]{14}$', tid_dir.name):
-                        continue
-                    # Use most recent file mtime inside the folder, not the folder itself
-                    # Windows doesn't update folder mtime when child files change
-                    file_mtimes = [f.stat().st_mtime for f in tid_dir.rglob("*") if f.is_file()]
-                    mtime = max(file_mtimes) if file_mtimes else tid_dir.stat().st_mtime
-                    # Prefer folders touched after session started
-                    if session_start > 0 and mtime < session_start:
-                        continue
+            for tid_dir in self._iter_title_dirs(root):
+                scanned_dirs += 1
+                # Use most recent file mtime inside the folder, not the folder itself
+                # Windows doesn't update folder mtime when child files change
+                file_mtimes = [f.stat().st_mtime for f in tid_dir.rglob("*") if f.is_file()]
+                mtime = max(file_mtimes) if file_mtimes else tid_dir.stat().st_mtime
+                # Best overall fallback candidate (used if no post-session writes are found)
+                if mtime > fallback_max_mtime:
+                    fallback_max_mtime = mtime
+                    fallback_tid = tid_dir.name.upper()
+
+                # Preferred candidate: folders touched after session started
+                if session_start <= 0 or mtime >= session_start:
                     if mtime > max_mtime:
                         max_mtime = mtime
                         recent_tid = tid_dir.name.upper()
+
+        if not recent_tid and fallback_tid:
+            recent_tid = fallback_tid
+        if not recent_tid:
+            logging.warning(f"[SwitchStrategy] Failed to resolve Title ID for '{rom.get('name', '')}'. Scanned title dirs: {scanned_dirs}")
         return recent_tid
 
     def _base_dir(self, rom: dict) -> Optional[Path]:
         tid = self._resolve_title_id(rom)
-        if not tid: return None
+        if not tid:
+            return None
         
         emu_dir = Path(self.emulator.get("executable_path", "")).parent
         search_roots = [
@@ -428,13 +451,35 @@ class SwitchStrategy(SaveStrategy):
             Path(os.path.expandvars(r'%APPDATA%\yuzu')),
         ]
         
+        session_start = getattr(self, 'session_start_time', 0)
+        recent_candidate, recent_mtime = None, 0
+        fallback_candidate, fallback_mtime = None, 0
+
         for root in search_roots:
-            save_base = root / "nand/user/save/0000000000000000"
-            if not save_base.exists(): continue
-            for profile_dir in save_base.iterdir():
-                if not profile_dir.is_dir(): continue
-                candidate = profile_dir / tid
-                if candidate.exists(): return candidate
+            for candidate in self._iter_title_dirs(root):
+                if candidate.name.upper() == tid:
+                    return candidate
+
+                try:
+                    file_mtimes = [f.stat().st_mtime for f in candidate.rglob("*") if f.is_file()]
+                    mtime = max(file_mtimes) if file_mtimes else candidate.stat().st_mtime
+                except Exception:
+                    mtime = 0
+
+                if mtime > fallback_mtime:
+                    fallback_mtime = mtime
+                    fallback_candidate = candidate
+
+                if session_start <= 0 or mtime >= session_start:
+                    if mtime > recent_mtime:
+                        recent_mtime = mtime
+                        recent_candidate = candidate
+
+        if recent_candidate:
+            return recent_candidate
+
+        if fallback_candidate:
+            return fallback_candidate
         return None
 
     def get_save_files(self, rom: dict) -> list[Path]:
@@ -670,6 +715,10 @@ _EMU_SAVE_HINTS: dict[str, list] = {
                 lambda _: Path.home() / "AppData" / "Roaming" / "rpcs3" / "dev_hdd0" / "home" / "00000001" / "savedata"],
     "eden":    [lambda _: Path.home() / "AppData" / "Roaming" / "eden" / "nand" / "user" / "save",
                 lambda _: Path.home() / "AppData" / "Roaming" / "yuzu" / "nand" / "user" / "save"],
+    "yuzu":    [lambda _: Path.home() / "AppData" / "Roaming" / "yuzu" / "nand" / "user" / "save",
+                lambda _: Path.home() / "AppData" / "Roaming" / "eden" / "nand" / "user" / "save"],
+    "suyu":    [lambda _: Path.home() / "AppData" / "Roaming" / "yuzu" / "nand" / "user" / "save",
+                lambda _: Path.home() / "AppData" / "Roaming" / "eden" / "nand" / "user" / "save"],
     "cemu":    [lambda e: Path(e).parent / "mlc01" / "usr" / "save",
                 lambda _: Path.home() / "AppData" / "Roaming" / "Cemu" / "mlc01" / "usr" / "save"],
     "azahar":  [lambda _: Path.home() / "AppData" / "Roaming" / "Azahar" / "user" / "sdmc",
@@ -1120,7 +1169,10 @@ def get_strategy(config: dict, emulator: dict) -> SaveStrategy:
     # This ensures specialized Title ID logic is used for PS3, Switch, Dolphin, etc.
     if mode in ("folder", "file", "retroarch"):
         # Explicit mapping for IDs that differ from registry keys
-        if emu_id == "eden": mode = "switch"
+        if emu_id in ("eden", "yuzu", "suyu"):
+            mode = "switch"
+        elif exe_name in ("yuzu.exe", "suyu.exe", "eden.exe"):
+            mode = "switch"
         elif emu_id == "rpcs3": mode = "ps3"
         elif emu_id == "duckstation": mode = "duckstation"
         elif emu_id == "redream": mode = "redream"
