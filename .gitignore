@@ -31,13 +31,14 @@ ENV/
 env/
 .venv/
 
-# Wingosy local data
-.wingosy/
+# Rom Mate local data
+.rommate/
 sync_cache.json
 cloud_check_file
 *.zip
 *.bak
 .env
+todo.md
 
 # TLS test artifacts
 *.pem
