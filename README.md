@@ -1,10 +1,9 @@
-<p align="center">
-  <img src="gif_example.gif" alt="Rom Mate in action" width="850">
-</p>
+## Attribution
+
+This app is a fork of [Wingosy-Launcher](https://github.com/abduznik/Wingosy-Launcher). This fork is created utilizing AI as a coder while I handle the ideation and testing. The end goal is to learn, have fun and create something useful.
 
 # Rom Mate
 > A companion app for RomM on Windows. Browse your library, launch games, and keep saves backed up automatically.
-> This fork is created utilizing AI as a coder while I handle the ideation and testing. The end goal is to learn, have fun and create something useful.
 
 ![Tests](https://github.com/Sixdd6/Wingosy-Launcher-Sixdd/actions/workflows/test.yml/badge.svg)
 
